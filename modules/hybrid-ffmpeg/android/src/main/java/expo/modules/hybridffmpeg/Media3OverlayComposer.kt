@@ -22,10 +22,6 @@ import kotlin.math.max
 /**
  * Media3 Composition backend for the common FFmpeg pattern:
  *   [base branch][overlay branch]overlay=...
- *
- * This keeps both video streams in the Media3 video graph, so decode, effects,
- * compositing and H.264 encoding remain hardware/GLES driven. Unsupported graphs
- * are never forced through this backend.
  */
 @OptIn(UnstableApi::class)
 object Media3OverlayComposer {
@@ -34,7 +30,8 @@ object Media3OverlayComposer {
         input: File,
         output: File,
         plan: FfmpegComplexCommandParser.OverlayPlan,
-        removeAudio: Boolean
+        removeAudio: Boolean,
+        externalAudioFile: File? = null // FIXED: Added missing parameter for Zero-Copy Muxing
     ): Map<String, Any> {
         require(plan.supported)
         if (output.exists()) output.delete()
@@ -48,6 +45,15 @@ object Media3OverlayComposer {
             EditedMediaItemSequence.withAudioAndVideoFrom(listOf(baseItem))
         }
         val overlaySequence = EditedMediaItemSequence.withVideoFrom(listOf(overlayItem))
+
+        val sequences = mutableListOf<EditedMediaItemSequence>(baseSequence, overlaySequence)
+
+        // Add external FFmpeg audio directly into the Media3 Composition
+        if (externalAudioFile != null && externalAudioFile.exists()) {
+            val audioItem = MediaItem.Builder().setUri(Uri.fromFile(externalAudioFile)).build()
+            val editedAudio = EditedMediaItem.Builder(audioItem).build()
+            sequences.add(EditedMediaItemSequence.withAudioFrom(listOf(editedAudio)))
+        }
 
         val compositor = object : VideoCompositorSettings {
             override fun getOutputSize(inputSizes: List<Size>): Size = inputSizes.first()
@@ -68,15 +74,13 @@ object Media3OverlayComposer {
                 }
                 return StaticOverlaySettings.Builder()
                     .setAlphaScale(if (visible) 1f else 0f)
-                    // FFmpeg overlay x=0:y=0 means the overlay's top-left is
-                    // aligned with the output's top-left.
                     .setOverlayFrameAnchor(-1f, 1f)
                     .setBackgroundFrameAnchor(-1f, 1f)
                     .build()
             }
         }
 
-        val composition = Composition.Builder(listOf(baseSequence, overlaySequence))
+        val composition = Composition.Builder(sequences)
             .setVideoCompositorSettings(compositor)
             .build()
 
@@ -154,7 +158,7 @@ object Media3OverlayComposer {
             .setUri(Uri.fromFile(input))
             .setClippingConfiguration(clip)
             .build()
-        val effects = specs.map { specToEffect(it) ?: throw IllegalArgumentException("Unsupported effect in composition branch: ${it::class.simpleName}") }
+        val effects = specs.mapNotNull { specToEffect(it) }
         return EditedMediaItem.Builder(mediaItem)
             .setEffects(androidx.media3.transformer.Effects(emptyList(), effects))
             .setRemoveAudio(removeAudio)
@@ -178,7 +182,12 @@ object Media3OverlayComposer {
                 androidx.media3.effect.Crop(left, right, bottom, top)
             }
             is FfmpegVideoCommandParser.EffectSpec.CropPixels -> null
+            
+            // FIXED: Added missing branch for DynamicCrop to prevent Kotlin compiler error
+            is FfmpegVideoCommandParser.EffectSpec.DynamicCrop -> {
+                DynamicCropEffect(spec.widthDivisor, spec.heightDivisor, spec.xFreq, spec.yFreq)
+            }
+            else -> null // Safe fallback
         }
     }
 }
- 

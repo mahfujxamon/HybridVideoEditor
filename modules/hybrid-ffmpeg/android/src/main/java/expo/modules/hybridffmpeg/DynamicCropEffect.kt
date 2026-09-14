@@ -35,16 +35,13 @@ private class DynamicCropShaderProgram(
     private val xFreq: Float,
     private val yFreq: Float,
 ) : BaseGlShaderProgram(
-    useHighPrecisionColorComponents = false,
-    texturePoolCapacity = 1,
+    false, // FIXED: Removed named argument 'useHighPrecisionColorComponents =' for Java interop
+    1      // FIXED: Removed named argument 'texturePoolCapacity =' for Java interop
 ) {
 
     private val glProgram: GlProgram
 
     init {
-        // Media3's GlProgram pipeline is GLES2-oriented. Do not use #version
-        // 300 es / in / out here; those can fail on devices/driver paths where
-        // the Media3 shader contract is GLES2.
         val vertexShader = """
             attribute vec4 aFramePosition;
             varying vec2 vTexSamplingCoord;
@@ -106,7 +103,11 @@ private class DynamicCropShaderProgram(
             glProgram.setFloatUniform("uXFreq", xFreq)
             glProgram.setFloatUniform("uYFreq", yFreq)
             glProgram.bindAttributesAndUniforms()
-            GlUtil.clearOutputFrame()
+            
+            // FIXED: Replaced unsupported GlUtil.clearOutputFrame() with standard GLES20 calls
+            GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GlUtil.checkGlError()
         } catch (t: Throwable) {

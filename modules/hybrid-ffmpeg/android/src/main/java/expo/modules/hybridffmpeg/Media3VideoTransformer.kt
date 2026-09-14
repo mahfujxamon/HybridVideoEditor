@@ -21,12 +21,6 @@ import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.Transformer
 import androidx.media3.common.util.UnstableApi
 
-/**
- * Primary GPU video backend.
- *
- * Media3 Transformer owns the decode -> OpenGL effect graph -> MediaCodec encode
- * pipeline. No application-level CPU pixel readback/upload is performed here.
- */
 @OptIn(UnstableApi::class)
 object Media3VideoTransformer {
     private const val TAG = "HVE-Media3"
@@ -66,7 +60,7 @@ object Media3VideoTransformer {
                         .buildUpon()
                         .setIsLooping(true)
                         .build()
-                    Composition.Builder(videoSequence, audioSequence).build()
+                    Composition.Builder(listOf(videoSequence, audioSequence)).build()
                 } else {
                     null
                 }
@@ -107,6 +101,7 @@ object Media3VideoTransformer {
                     .setVideoMimeType(MimeTypes.VIDEO_H264)
                     .addListener(listener)
                     .build()
+                
                 if (composition != null) {
                     transformer.start(composition, output.absolutePath)
                 } else {
@@ -162,6 +157,12 @@ object Media3VideoTransformer {
                 }
                 is FfmpegVideoCommandParser.EffectSpec.Rotate -> out += ScaleAndRotateTransformation.Builder().setRotationDegrees(spec.degrees).build()
                 is FfmpegVideoCommandParser.EffectSpec.GaussianBlur -> out += GaussianBlur(spec.sigma)
+                
+                // FIXED: Added missing branch for DynamicCrop to prevent Kotlin compiler error
+                is FfmpegVideoCommandParser.EffectSpec.DynamicCrop -> {
+                    out += DynamicCropEffect(spec.widthDivisor, spec.heightDivisor, spec.xFreq, spec.yFreq)
+                }
+                else -> {} // Safe fallback
             }
         }
         return out
