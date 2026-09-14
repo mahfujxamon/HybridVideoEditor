@@ -1,0 +1,257 @@
+name: FFmpeg OpenCL Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-opencl:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout app repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config \
+            curl \
+            git \
+            build-essential \
+            yasm \
+            nasm \
+            gperf \
+            texinfo \
+            bison \
+            ragel \
+            python3 \
+            python3-pip \
+            unzip \
+            zip \
+            wget \
+            meson \
+            ninja-build \
+            doxygen \
+            cmake \
+            autogen \
+            autopoint \
+            groff \
+            gtk-doc-tools \
+            libtasn1-bin \
+            opencl-headers \
+            ocl-icd-opencl-dev
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and NDK
+        run: |
+          sdkmanager "platform-tools" \
+                     "platforms;android-35" \
+                     "build-tools;35.0.0" \
+                     "ndk;27.2.12479018"
+
+      - name: Setup Android environment
+        run: |
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> "$GITHUB_ENV"
+
+          echo "===== Android Environment ====="
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.2.12479018"
+
+      - name: Clone maintained FFmpegKit source
+        run: |
+          git clone --recurse-submodules \
+            https://github.com/ffmpegkit-maintained/ffmpeg-kit.git \
+            ffmpeg-kit
+
+      - name: Verify FFmpegKit source
+        working-directory: ffmpeg-kit
+        run: |
+          echo "=============================================="
+          echo "FFMPEGKIT SOURCE VERIFICATION"
+          echo "=============================================="
+
+          echo ""
+          echo "===== Repository ====="
+          git remote -v
+
+          echo ""
+          echo "===== Git version ====="
+          git describe --tags --always || true
+
+          echo ""
+          echo "===== Android 8.1 LTS ====="
+          test -f android-8.1-lts/android.sh
+          ls -lh android-8.1-lts/android.sh
+
+          echo ""
+          echo "===== Android build scripts ====="
+          test -f android-8.1-lts/scripts/android/ffmpeg.sh
+          ls -lh android-8.1-lts/scripts/android/ffmpeg.sh
+
+          echo ""
+          echo "===== FFmpeg source directory ====="
+          if [ -d "src/ffmpeg" ]; then
+            echo "src/ffmpeg already exists"
+            ls -la src/ffmpeg | head -50
+          else
+            echo "src/ffmpeg does not exist yet."
+            echo "This is expected before android.sh downloads/prepares FFmpeg."
+          fi
+
+          echo ""
+          echo "===== FFmpeg configure availability ====="
+          if [ -f "src/ffmpeg/configure" ]; then
+            echo "configure exists"
+            grep -n -- "--enable-opencl" src/ffmpeg/configure || true
+          else
+            echo "configure is not present yet."
+            echo "Skipping configure inspection at this stage."
+          fi
+
+      - name: Inspect Android FFmpeg build script
+        working-directory: ffmpeg-kit
+        run: |
+          FILE="android-8.1-lts/scripts/android/ffmpeg.sh"
+
+          echo "=============================================="
+          echo "ANDROID FFMPEG BUILD SCRIPT"
+          echo "=============================================="
+
+          echo ""
+          echo "===== CONFIGURE_POSTFIX ====="
+          grep -n -A8 -B8 "CONFIGURE_POSTFIX" "$FILE" || true
+
+          echo ""
+          echo "===== OpenCL references ====="
+          grep -n -i "opencl" "$FILE" || true
+
+      - name: Patch Android FFmpeg configure for OpenCL
+        working-directory: ffmpeg-kit
+        run: |
+          FILE="android-8.1-lts/scripts/android/ffmpeg.sh"
+
+          echo "=============================================="
+          echo "PATCHING FFMPEG OPENCL CONFIGURATION"
+          echo "=============================================="
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("android-8.1-lts/scripts/android/ffmpeg.sh")
+          text = p.read_text()
+
+          target = 'CONFIGURE_POSTFIX=""'
+
+          if target not in text:
+              raise SystemExit(
+                  "ERROR: CONFIGURE_POSTFIX marker was not found"
+              )
+
+          if "--enable-opencl" in text:
+              print("OpenCL flag already exists. No duplicate patch added.")
+          else:
+              replacement = '''CONFIGURE_POSTFIX=""
+          CONFIGURE_POSTFIX+=" --enable-opencl"
+          '''
+
+              text = text.replace(target, replacement, 1)
+              p.write_text(text)
+
+              print("OpenCL configure flag successfully injected.")
+
+          PY
+
+          echo ""
+          echo "===== Patched OpenCL line ====="
+          grep -n -- "--enable-opencl" "$FILE"
+
+          echo ""
+          echo "===== Patched CONFIGURE_POSTFIX ====="
+          grep -n -A8 -B4 "CONFIGURE_POSTFIX" "$FILE"
+
+      - name: Verify host OpenCL development environment
+        run: |
+          echo "=============================================="
+          echo "HOST OPENCL ENVIRONMENT"
+          echo "=============================================="
+
+          echo ""
+          echo "===== OpenCL headers ====="
+          find \
+            /usr/include/CL \
+            /usr/include/OpenCL \
+            -maxdepth 2 \
+            -type f \
+            2>/dev/null \
+            | head -50 || true
+
+          echo ""
+          echo "===== OpenCL libraries ====="
+          ldconfig -p 2>/dev/null \
+            | grep -i opencl \
+            || true
+
+          echo ""
+          echo "===== pkg-config OpenCL ====="
+          pkg-config --cflags --libs OpenCL 2>/dev/null \
+            || true
+
+      - name: Verify Android build script
+        working-directory: ffmpeg-kit/android-8.1-lts
+        run: |
+          chmod +x android.sh
+
+          echo "=============================================="
+          echo "ANDROID BUILD SCRIPT VERIFICATION"
+          echo "=============================================="
+
+          echo ""
+          echo "===== Android build help ====="
+          ./android.sh --help | head -120
+
+          echo ""
+          echo "===== OpenCL patch verification ====="
+          grep -n -- "--enable-opencl" scripts/android/ffmpeg.sh
+
+          echo ""
+          echo "===== Android FFmpeg script ====="
+          test -f scripts/android/ffmpeg.sh
+
+      - name: Final OpenCL configuration report
+        working-directory: ffmpeg-kit
+        run: |
+          echo ""
+          echo "================================================"
+          echo "       OPENCL CONFIGURATION PATCH VERIFIED"
+          echo "================================================"
+          echo ""
+
+          echo "Maintained FFmpegKit source : OK"
+          echo "Android 8.1 LTS build system : OK"
+          echo "Android build script          : OK"
+          echo "OpenCL configure injection    : OK"
+          echo "Host OpenCL headers           : CHECKED"
+          echo "Host OpenCL library           : CHECKED"
+          echo ""
+
+          echo "IMPORTANT:"
+          echo "Native FFmpeg compilation has NOT started."
+          echo ""
+          echo "The next stage must provide/resolve"
+          echo "Android-compatible OpenCL linking/runtime."
+          echo ""
+          echo "================================================"

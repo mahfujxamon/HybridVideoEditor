@@ -1,0 +1,261 @@
+name: Android Clean Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # FREE RUNNER DISK SPACE
+      # ============================================================
+      - name: Free Disk Space
+        run: |
+          echo "===== DISK BEFORE CLEANUP ====="
+          df -h
+
+          echo ""
+          echo "===== Removing Android emulator/system images ====="
+          sudo rm -rf /usr/local/lib/android/sdk/system-images || true
+          sudo rm -rf /usr/local/lib/android/sdk/emulator || true
+
+          echo ""
+          echo "===== Removing unused SDK build-tools ====="
+          find /usr/local/lib/android/sdk/build-tools \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            ! -name "35.0.0" \
+            -exec sudo rm -rf {} + || true
+
+          echo ""
+          echo "===== Removing unused SDK platforms ====="
+          find /usr/local/lib/android/sdk/platforms \
+            -mindepth 1 \
+            -maxdepth 1 \
+            -type d \
+            ! -name "android-35" \
+            -exec sudo rm -rf {} + || true
+
+          echo ""
+          echo "===== Removing large preinstalled caches ====="
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/powershell || true
+          sudo rm -rf /usr/local/lib/android/sdk/.temp || true
+
+          echo ""
+          echo "===== Removing old Gradle caches ====="
+          rm -rf ~/.gradle/caches || true
+          rm -rf ~/.gradle/wrapper/dists || true
+
+          echo ""
+          echo "===== Removing npm cache ====="
+          npm cache clean --force || true
+
+          echo ""
+          echo "===== DISK AFTER CLEANUP ====="
+          df -h
+
+      # ============================================================
+      # NODE
+      # ============================================================
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # ============================================================
+      # JAVA
+      # ============================================================
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ============================================================
+      # INSTALL JS DEPENDENCIES
+      # ============================================================
+      - name: Install dependencies
+        run: npm ci --prefer-offline=false --no-audit --no-fund
+
+      # ============================================================
+      # GRADLE PERMISSION
+      # ============================================================
+      - name: Make Gradle executable
+        run: chmod +x android/gradlew
+
+      # ============================================================
+      # CHECK DISK BEFORE GRADLE
+      # ============================================================
+      - name: Check Build Disk Space
+        run: |
+          echo "===== DISK BEFORE GRADLE ====="
+          df -h
+
+          echo ""
+          echo "===== LARGE DIRECTORIES ====="
+          du -sh \
+            ~/.gradle \
+            ~/.npm \
+            android \
+            node_modules \
+            /usr/local/lib/android/sdk \
+            2>/dev/null || true
+
+      # ============================================================
+      # DIAGNOSE FFMPEG RUNTIME DEPENDENCY
+      # ============================================================
+      - name: Diagnose FFmpeg Runtime Dependency
+        working-directory: android
+        run: |
+          echo "===== FFmpeg dependency ====="
+
+          ./gradlew app:dependencies \
+            --configuration releaseRuntimeClasspath \
+            --no-daemon \
+            --max-workers=2 \
+            | grep -iE "ffmpeg|smart-exception" || true
+
+          echo ""
+          echo "===== FFmpeg dependency insight ====="
+
+          ./gradlew app:dependencyInsight \
+            --dependency ffmpeg-kit-full \
+            --configuration releaseRuntimeClasspath \
+            --no-daemon \
+            --max-workers=2 || true
+
+          echo ""
+          echo "===== FFmpeg AAR files ====="
+
+          find ~/.gradle/caches/modules-2/files-2.1 \
+            -type f \
+            \( -iname "*ffmpeg*.aar" -o -iname "*smart-exception*.jar" \) \
+            -print || true
+
+          echo ""
+          echo "===== Inspect FFmpeg AAR classes ====="
+
+          AAR=$(find \
+            ~/.gradle/caches/modules-2/files-2.1/dev.ffmpegkit-maintained/ffmpeg-kit-full/8.1.7 \
+            -name "*.aar" \
+            | head -n 1)
+
+          echo "AAR: $AAR"
+
+          if [ -n "$AAR" ]; then
+
+            unzip -p "$AAR" classes.jar > /tmp/ffmpeg-classes.jar
+
+            echo ""
+            echo "--- FFmpegKitConfig ---"
+
+            jar tf /tmp/ffmpeg-classes.jar \
+              | grep "FFmpegKitConfig" || true
+
+            echo ""
+            echo "--- FFmpegKit classes ---"
+
+            jar tf /tmp/ffmpeg-classes.jar \
+              | grep "com/arthenica/ffmpegkit/FFmpegKit" || true
+
+          else
+            echo "ERROR: FFmpeg AAR was not found"
+          fi
+
+      # ============================================================
+      # BUILD RELEASE APK
+      # ============================================================
+      - name: Build Release APK
+        working-directory: android
+        run: |
+          echo "===== DISK BEFORE BUILD ====="
+          df -h
+
+          ./gradlew assembleRelease \
+            --no-daemon \
+            --no-build-cache \
+            --max-workers=2 \
+            --stacktrace
+
+          echo ""
+          echo "===== DISK AFTER BUILD ====="
+          df -h
+
+      # ============================================================
+      # VERIFY APK
+      # ============================================================
+      - name: Verify Release APK
+        working-directory: android
+        run: |
+          APK="app/build/outputs/apk/release/app-release.apk"
+
+          echo "===== FINAL APK ====="
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: Release APK was not created."
+            exit 1
+          fi
+
+          ls -lh "$APK"
+
+          echo ""
+          echo "===== APK SIZE ====="
+          du -h "$APK"
+
+      # ============================================================
+      # INSPECT FFMPEG CLASSES
+      # ============================================================
+      - name: Inspect FFmpeg classes in final APK
+        working-directory: android
+        run: |
+          APK="app/build/outputs/apk/release/app-release.apk"
+
+          echo "===== Find apkanalyzer ====="
+
+          APKANALYZER=$(find "$ANDROID_HOME" \
+            -name apkanalyzer \
+            -type f \
+            | head -n 1)
+
+          echo "apkanalyzer: $APKANALYZER"
+
+          if [ -n "$APKANALYZER" ]; then
+
+            echo ""
+            echo "===== FFmpeg classes inside final APK ====="
+
+            "$APKANALYZER" dex packages "$APK" \
+              | grep -i "com.arthenica.ffmpegkit" || true
+
+            echo ""
+            echo "===== FFmpegKitConfig inside final APK ====="
+
+            "$APKANALYZER" dex packages "$APK" \
+              | grep -i "FFmpegKitConfig" || true
+
+          else
+            echo "ERROR: apkanalyzer was not found"
+          fi
+
+      # ============================================================
+      # UPLOAD APK
+      # ============================================================
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: HybridVideoEditor-APK
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error

@@ -1,0 +1,44 @@
+plugins {
+    id 'com.android.library'
+    id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.hybridffmpeg'
+version = '0.1.0'
+
+android {
+    namespace "expo.modules.hybridffmpeg"
+
+    defaultConfig {
+        versionCode 1
+        versionName "0.1.0"
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file("src/main/cpp/CMakeLists.txt")
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    lintOptions {
+        abortOnError false
+    }
+}
+
+dependencies {
+    implementation project(':expo-modules-core')
+
+    implementation 'dev.ffmpegkit-maintained:ffmpeg-kit-full:8.1.7'
+
+    implementation 'com.arthenica:smart-exception-java:0.2.1'
+
+    // Media3 Transformer: hardware MediaCodec video decode/encode + OpenGL ES effects
+    implementation "androidx.media3:media3-transformer:1.11.0"
+    implementation "androidx.media3:media3-effect:1.11.0"
+    implementation "androidx.media3:media3-common:1.11.0"
+}
