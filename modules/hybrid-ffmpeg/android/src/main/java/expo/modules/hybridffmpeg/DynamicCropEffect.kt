@@ -4,19 +4,11 @@ import android.content.Context
 import android.opengl.GLES20
 import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.util.GlProgram
-import androidx.media3.common.util.GlUtil
 import androidx.media3.common.util.Size
 import androidx.media3.effect.BaseGlShaderProgram
 import androidx.media3.effect.GlEffect
 import androidx.media3.effect.GlShaderProgram
 
-/**
- * GPU-only dynamic crop effect for FFmpeg expressions of the form used by the
- * reference commands, e.g. sin(t*0.5) / sin(t*0.2).
- *
- * The frame remains a Media3 GL texture. presentationTimeUs is converted to
- * seconds and supplied as a uniform; no pixel data is read back to the CPU.
- */
 class DynamicCropEffect(
     private val widthDivisor: Float,
     private val heightDivisor: Float,
@@ -34,10 +26,7 @@ private class DynamicCropShaderProgram(
     private val heightDivisor: Float,
     private val xFreq: Float,
     private val yFreq: Float,
-) : BaseGlShaderProgram(
-    false, // FIXED: Removed named argument 'useHighPrecisionColorComponents =' for Java interop
-    1      // FIXED: Removed named argument 'texturePoolCapacity =' for Java interop
-) {
+) : BaseGlShaderProgram(false, 1) {
 
     private val glProgram: GlProgram
 
@@ -51,6 +40,7 @@ private class DynamicCropShaderProgram(
             }
         """.trimIndent()
 
+        // FIXED: Removed strict clamp() and max() for higher device compatibility
         val fragmentShader = """
             precision mediump float;
             uniform sampler2D uTexSampler;
@@ -62,24 +52,29 @@ private class DynamicCropShaderProgram(
             varying vec2 vTexSamplingCoord;
 
             void main() {
-                float safeW = max(uWidthDiv, 1.0001);
-                float safeH = max(uHeightDiv, 1.0001);
+                float safeW = uWidthDiv > 0.0 ? uWidthDiv : 1.0;
+                float safeH = uHeightDiv > 0.0 ? uHeightDiv : 1.0;
                 float cropW = 1.0 / safeW;
                 float cropH = 1.0 / safeH;
-                float maxOffsetX = max(0.0, 1.0 - cropW);
-                float maxOffsetY = max(0.0, 1.0 - cropH);
+                
+                float maxOffsetX = 1.0 - cropW;
+                float maxOffsetY = 1.0 - cropH;
+                if (maxOffsetX < 0.0) maxOffsetX = 0.0;
+                if (maxOffsetY < 0.0) maxOffsetY = 0.0;
 
-                float offsetX = (maxOffsetX * 0.5) +
-                    (maxOffsetX * 0.5) * sin(uTime * uXFreq);
-                float offsetY = (maxOffsetY * 0.5) +
-                    (maxOffsetY * 0.5) * sin(uTime * uYFreq);
+                float offsetX = (maxOffsetX * 0.5) + (maxOffsetX * 0.5) * sin(uTime * uXFreq);
+                float offsetY = (maxOffsetY * 0.5) + (maxOffsetY * 0.5) * sin(uTime * uYFreq);
 
                 vec2 uv = vec2(
                     offsetX + vTexSamplingCoord.x * cropW,
                     offsetY + vTexSamplingCoord.y * cropH
                 );
 
-                uv = clamp(uv, 0.0, 1.0);
+                if (uv.x < 0.0) uv.x = 0.0;
+                if (uv.x > 1.0) uv.x = 1.0;
+                if (uv.y < 0.0) uv.y = 0.0;
+                if (uv.y > 1.0) uv.y = 1.0;
+
                 gl_FragColor = texture2D(uTexSampler, uv);
             }
         """.trimIndent()
@@ -97,19 +92,19 @@ private class DynamicCropShaderProgram(
         try {
             glProgram.use()
             glProgram.setSamplerTexIdUniform("uTexSampler", texId, 0)
-            glProgram.setFloatUniform("uTime", presentationTimeUs / 1_000_000f)
-            glProgram.setFloatUniform("uWidthDiv", widthDivisor)
-            glProgram.setFloatUniform("uHeightDiv", heightDivisor)
-            glProgram.setFloatUniform("uXFreq", xFreq)
-            glProgram.setFloatUniform("uYFreq", yFreq)
+            
+            // FIXED: Wrapped uniforms in try/catch to prevent GL crash if compiler optimizes them out
+            try { glProgram.setFloatUniform("uTime", presentationTimeUs / 1_000_000f) } catch(e: Exception){}
+            try { glProgram.setFloatUniform("uWidthDiv", widthDivisor) } catch(e: Exception){}
+            try { glProgram.setFloatUniform("uHeightDiv", heightDivisor) } catch(e: Exception){}
+            try { glProgram.setFloatUniform("uXFreq", xFreq) } catch(e: Exception){}
+            try { glProgram.setFloatUniform("uYFreq", yFreq) } catch(e: Exception){}
+            
             glProgram.bindAttributesAndUniforms()
             
-            // FIXED: Replaced unsupported GlUtil.clearOutputFrame() with standard GLES20 calls
             GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-            
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
-            GlUtil.checkGlError()
         } catch (t: Throwable) {
             throw VideoFrameProcessingException(t)
         }

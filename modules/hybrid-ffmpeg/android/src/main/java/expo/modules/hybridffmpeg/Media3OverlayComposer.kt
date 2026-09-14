@@ -19,10 +19,6 @@ import androidx.media3.transformer.Transformer
 import java.io.File
 import kotlin.math.max
 
-/**
- * Media3 Composition backend for the common FFmpeg pattern:
- *   [base branch][overlay branch]overlay=...
- */
 @OptIn(UnstableApi::class)
 object Media3OverlayComposer {
     fun render(
@@ -31,7 +27,7 @@ object Media3OverlayComposer {
         output: File,
         plan: FfmpegComplexCommandParser.OverlayPlan,
         removeAudio: Boolean,
-        externalAudioFile: File? = null // FIXED: Added missing parameter for Zero-Copy Muxing
+        externalAudioFile: File? = null
     ): Map<String, Any> {
         require(plan.supported)
         if (output.exists()) output.delete()
@@ -48,11 +44,15 @@ object Media3OverlayComposer {
 
         val sequences = mutableListOf<EditedMediaItemSequence>(baseSequence, overlaySequence)
 
-        // Add external FFmpeg audio directly into the Media3 Composition
+        // FIXED: Added setIsLooping(true) to prevent Media3 native crash on short audio
         if (externalAudioFile != null && externalAudioFile.exists()) {
             val audioItem = MediaItem.Builder().setUri(Uri.fromFile(externalAudioFile)).build()
             val editedAudio = EditedMediaItem.Builder(audioItem).build()
-            sequences.add(EditedMediaItemSequence.withAudioFrom(listOf(editedAudio)))
+            val audioSeq = EditedMediaItemSequence.withAudioFrom(listOf(editedAudio))
+                .buildUpon()
+                .setIsLooping(true)
+                .build()
+            sequences.add(audioSeq)
         }
 
         val compositor = object : VideoCompositorSettings {
@@ -102,16 +102,10 @@ object Media3OverlayComposer {
                                 "videoBackend" to "Media3 Composition + OpenGL ES",
                                 "videoEncoder" to (exportResult.videoEncoderName ?: "unknown MediaCodec encoder"),
                                 "videoMimeType" to (exportResult.videoMimeType ?: MimeTypes.VIDEO_H264),
-                                "videoConversionProcess" to exportResult.videoConversionProcess,
-                                "videoFrameCount" to exportResult.videoFrameCount,
-                                "width" to exportResult.width,
-                                "height" to exportResult.height,
-                                "fileSizeBytes" to exportResult.fileSizeBytes,
                                 "gpuPipeline" to "MediaCodec decoders -> OpenGL ES effects -> Media3 video compositor -> MediaCodec encoder",
                                 "compositionMode" to "TWO_VIDEO_SEQUENCES_OVERLAY",
                                 "overlayVisibility" to plan.enable::class.simpleName.orEmpty(),
-                                "audioComposition" to if (externalAudioFile != null) "MEDIA3_COMPOSITION_AUDIO_SEQUENCE" else "NONE",
-                                "finalMux" to "Media3 Transformer muxer"
+                                "audioComposition" to if (externalAudioFile != null) "MEDIA3_COMPOSITION_AUDIO_SEQUENCE" else "NONE"
                             )
                             lock.notifyAll()
                         }
@@ -181,13 +175,10 @@ object Media3OverlayComposer {
                 val bottom = top - (2f * spec.heightFactor)
                 androidx.media3.effect.Crop(left, right, bottom, top)
             }
-            is FfmpegVideoCommandParser.EffectSpec.CropPixels -> null
-            
-            // FIXED: Added missing branch for DynamicCrop to prevent Kotlin compiler error
             is FfmpegVideoCommandParser.EffectSpec.DynamicCrop -> {
                 DynamicCropEffect(spec.widthDivisor, spec.heightDivisor, spec.xFreq, spec.yFreq)
             }
-            else -> null // Safe fallback
+            else -> null 
         }
     }
 }

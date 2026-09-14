@@ -291,7 +291,7 @@ class HybridFfmpegModule : Module() {
      * Media3 GPU IR could not represent. In particular, dynamic expressions
      * and complex filter graphs are device-sensitive on some MediaCodec
      * implementations. We keep MediaCodec for ordinary/simple fallbacks, but
-     * deliberately use libx264 for risky graphs so a failed Media3 parse cannot
+     * deliberately use libopenh264 for risky graphs so a failed Media3 parse cannot
      * turn into a native hardware-encoder crash.
      */
     private fun shouldPreferCpuFallback(command: String): Boolean {
@@ -308,23 +308,31 @@ class HybridFfmpegModule : Module() {
     private fun prepareCpuFallbackEncoder(command: String): String {
         var result = command
 
+        // FIXED: Replaced libx264 with libopenh264 to match FFmpeg LTS capabilities
         result = result.replace(
             Regex("(?i)(-c:v\\s+)(h264_mediacodec|h264|libx265|libx264)"),
-            "$1libx264"
+            "$1libopenh264"
         )
         result = result.replace(
             Regex("(?i)(-vcodec\\s+)(h264_mediacodec|h264|libx265|libx264)"),
-            "$1libx264"
+            "$1libopenh264"
         )
         result = result.replace(
             Regex("(?i)(-codec:v\\s+)(h264_mediacodec|h264|libx265|libx264)"),
-            "$1libx264"
+            "$1libopenh264"
         )
 
         val hasVideoCodec = Regex(
             "(?i)(-c:v|-vcodec|-codec:v)\\s+\\S+"
         ).containsMatchIn(result)
-        if (!hasVideoCodec) result += " -c:v libx264"
+        
+        if (!hasVideoCodec) result += " -c:v libopenh264"
+
+        // FIXED: Remove unsupported x264 specific flags for libopenh264 compatibility
+        result = result.replace(Regex("(?i)\\s+-preset\\s+\\S+"), "")
+        result = result.replace(Regex("(?i)\\s+-crf\\s+\\S+"), "")
+        result = result.replace(Regex("(?i)\\s+-tune\\s+\\S+"), "")
+        result = result.replace(Regex("(?i)\\s+-threads\\s+\\S+"), "")
 
         return result.trim()
     }
@@ -2319,18 +2327,18 @@ class HybridFfmpegModule : Module() {
 
                 FFmpegKit.executeAsync(finalCommand) { session ->
                     if (ReturnCode.isSuccess(session.returnCode)) {
-                        resolveFallbackResult(session, finalCommand, if (fallbackCpuSafe) "libx264 (CPU_SAFE_FALLBACK)" else "h264_mediacodec")
+                        resolveFallbackResult(session, finalCommand, if (fallbackCpuSafe) "libopenh264 (CPU_SAFE_FALLBACK)" else "h264_mediacodec")
                         return@executeAsync
                     }
 
-                    // Automatic hardware-encoder recovery: retry the same graph once with libx264.
+                    // Automatic hardware-encoder recovery: retry the same graph once with libopenh264.
                     // Do not do this for graphs already classified as CPU-safe, because their issue
                     // is the graph itself rather than the hardware encoder.
                     if (!fallbackCpuSafe && finalCommand.contains("h264_mediacodec", ignoreCase = true)) {
                         val cpuRetryCommand = prepareCpuFallbackEncoder(finalCommand)
                         FFmpegKit.executeAsync(cpuRetryCommand) { retrySession ->
                             if (ReturnCode.isSuccess(retrySession.returnCode)) {
-                                resolveFallbackResult(retrySession, cpuRetryCommand, "libx264 (AUTO_RETRY_AFTER_HARDWARE_FAILURE)")
+                                resolveFallbackResult(retrySession, cpuRetryCommand, "libopenh264 (AUTO_RETRY_AFTER_HARDWARE_FAILURE)")
                             } else {
                                 val retryDiagnostic = retrySession.getAllLogsAsString().takeLast(12000)
                                 val failureMessage = buildString {
@@ -2349,15 +2357,13 @@ class HybridFfmpegModule : Module() {
                     val failureMessage = buildString {
                         append("FFmpeg rendering failed\n\n")
                         append("Backend: FFmpegKit fallback\n")
-                        append("Encoder strategy: ").append(if (fallbackCpuSafe) "libx264 (CPU_SAFE_FALLBACK)" else "h264_mediacodec").append('\n')
+                        append("Encoder strategy: ").append(if (fallbackCpuSafe) "libopenh264 (CPU_SAFE_FALLBACK)" else "h264_mediacodec").append('\n')
                         append("Return code: ").append(session.returnCode?.toString() ?: "NULL").append("\n\n")
                         append("Command used:\n").append(finalCommand)
                         if (diagnostic.isNotBlank()) append("\n\nFFmpeg log:\n").append(diagnostic)
                     }
                     promise.reject("FFMPEG_FAILED", failureMessage, null)
                 }
-
-                /* Legacy fallback block replaced by resolveFallbackResult + retry above. */
 
             } catch (error: Exception) {
 
