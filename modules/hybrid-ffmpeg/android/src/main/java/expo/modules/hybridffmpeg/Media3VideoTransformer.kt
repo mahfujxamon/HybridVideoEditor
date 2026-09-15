@@ -158,9 +158,18 @@ object Media3VideoTransformer {
                 is FfmpegVideoCommandParser.EffectSpec.Rotate -> out += ScaleAndRotateTransformation.Builder().setRotationDegrees(spec.degrees).build()
                 is FfmpegVideoCommandParser.EffectSpec.GaussianBlur -> out += GaussianBlur(spec.sigma)
                 
-                // FIXED: Added missing branch for DynamicCrop to prevent Kotlin compiler error
                 is FfmpegVideoCommandParser.EffectSpec.DynamicCrop -> {
                     out += DynamicCropEffect(spec.widthDivisor, spec.heightDivisor, spec.xFreq, spec.yFreq)
+                }
+                
+                // AI Shader যুক্ত করা হলো
+                is FfmpegVideoCommandParser.EffectSpec.AiCustomShader -> {
+                    try {
+                        val shaderCode = java.io.File(spec.shaderPath).readText()
+                        out += CustomAiShaderEffect(shaderCode)
+                    } catch (e: Exception) {
+                        android.util.Log.e("HVE-Media3", "AI Shader লোড করতে ব্যর্থ: \${spec.shaderPath}", e)
+                    }
                 }
                 else -> {} // Safe fallback
             }
