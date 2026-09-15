@@ -4,10 +4,14 @@ import android.content.Context
 import android.opengl.GLES20
 import androidx.media3.common.VideoFrameProcessingException
 import androidx.media3.common.util.GlProgram
+import androidx.media3.common.util.GlUtil
 import androidx.media3.common.util.Size
 import androidx.media3.effect.BaseGlShaderProgram
 import androidx.media3.effect.GlEffect
 import androidx.media3.effect.GlShaderProgram
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.nio.FloatBuffer
 
 class DynamicCropEffect(
     private val widthDivisor: Float,
@@ -29,8 +33,24 @@ private class DynamicCropShaderProgram(
 ) : BaseGlShaderProgram(false, 1) {
 
     private val glProgram: GlProgram
+    private val vertexBuffer: FloatBuffer
 
     init {
+        // 4 Quad coordinates covering full screen: [-1, -1] to [1, 1]
+        val quadCoords = floatArrayOf(
+            -1.0f, -1.0f, 0.0f, 1.0f,
+             1.0f, -1.0f, 0.0f, 1.0f,
+            -1.0f,  1.0f, 0.0f, 1.0f,
+             1.0f,  1.0f, 0.0f, 1.0f
+        )
+        vertexBuffer = ByteBuffer.allocateDirect(quadCoords.size * 4)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+            .apply {
+                put(quadCoords)
+                position(0)
+            }
+
         val vertexShader = """
             attribute vec4 aFramePosition;
             varying vec2 vTexSamplingCoord;
@@ -40,7 +60,6 @@ private class DynamicCropShaderProgram(
             }
         """.trimIndent()
 
-        // FIXED: Removed strict clamp() and max() for higher device compatibility
         val fragmentShader = """
             precision mediump float;
             uniform sampler2D uTexSampler;
@@ -93,18 +112,21 @@ private class DynamicCropShaderProgram(
             glProgram.use()
             glProgram.setSamplerTexIdUniform("uTexSampler", texId, 0)
             
-            // FIXED: Wrapped uniforms in try/catch to prevent GL crash if compiler optimizes them out
-            try { glProgram.setFloatUniform("uTime", presentationTimeUs / 1_000_000f) } catch(e: Exception){}
-            try { glProgram.setFloatUniform("uWidthDiv", widthDivisor) } catch(e: Exception){}
-            try { glProgram.setFloatUniform("uHeightDiv", heightDivisor) } catch(e: Exception){}
-            try { glProgram.setFloatUniform("uXFreq", xFreq) } catch(e: Exception){}
-            try { glProgram.setFloatUniform("uYFreq", yFreq) } catch(e: Exception){}
+            // BIND VERTEX BUFFER (Fixes the crash)
+            glProgram.setBufferAttribute("aFramePosition", vertexBuffer, 4)
+
+            try { glProgram.setFloatUniform("uTime", presentationTimeUs / 1_000_000f) } catch(_: Exception){}
+            try { glProgram.setFloatUniform("uWidthDiv", widthDivisor) } catch(_: Exception){}
+            try { glProgram.setFloatUniform("uHeightDiv", heightDivisor) } catch(_: Exception){}
+            try { glProgram.setFloatUniform("uXFreq", xFreq) } catch(_: Exception){}
+            try { glProgram.setFloatUniform("uYFreq", yFreq) } catch(_: Exception){}
             
             glProgram.bindAttributesAndUniforms()
             
             GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
+            GlUtil.checkGlError()
         } catch (t: Throwable) {
             throw VideoFrameProcessingException(t)
         }
