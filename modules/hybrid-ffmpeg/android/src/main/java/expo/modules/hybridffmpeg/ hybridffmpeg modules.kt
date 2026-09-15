@@ -5,18 +5,19 @@ import android.content.ContentValues
 import android.net.Uri
 import android.provider.MediaStore
 import android.media.MediaCodecList
-import android.opengl.EGL14
-import android.opengl.EGLConfig
-import android.opengl.EGLContext
-import android.opengl.EGLDisplay
-import android.opengl.EGLSurface
-import android.opengl.GLES20
 import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.FloatBuffer
-import java.util.Locale
 import java.io.FileOutputStream
+import kotlin.math.max
+
+import androidx.media3.common.Effect
+import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.effect.Crop
+import androidx.media3.effect.GaussianBlur
+import androidx.media3.effect.RgbFilter
+import androidx.media3.effect.ScaleAndRotateTransformation
+import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.Effects
 
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
@@ -25,6 +26,7 @@ import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
+@OptIn(UnstableApi::class)
 class HybridFfmpegModule : Module() {
 
     private fun getContext(): Context {
@@ -209,6 +211,10 @@ class HybridFfmpegModule : Module() {
 
     private fun buildUniversalCommand(userCommand: String, inputFile: File, outputFile: File): String {
         var command = normalizeCommand(userCommand)
+        // 96 ব্যাচ ফাইলের %%t বা %~nt ওয়াইল্ডকার্ড স্বয়ংক্রিয়ভাবে হ্যান্ডেল করা হচ্ছে
+        command = command.replace("%%t", "\"${inputFile.absolutePath}\"")
+        command = command.replace("%~nt", inputFile.nameWithoutExtension)
+
         val isFullCommand = command.contains("-i") || command.contains("<INPUT_VIDEO>")
         if (isFullCommand) {
             command = command.replace("<INPUT_VIDEO>", "\"${inputFile.absolutePath}\"")
@@ -242,7 +248,122 @@ class HybridFfmpegModule : Module() {
         }
     }
 
-    private external fun nativeOpenClDiagnostic(): String
+    // ----------------- ADVANCED 96-BATCH PARSER & CONVERTER HELPERS -----------------
+
+    private fun extractInputStartTimes(command: String): Pair<Double, Double> {
+        val tokens = FfmpegCommandTokenizer.tokenize(command)
+        var input0Start = 0.0
+        var input1Start = 0.0
+        var inputCount = 0
+        for (i in tokens.indices) {
+            if (tokens[i].equals("-i", ignoreCase = true) && i + 1 < tokens.size) {
+                var ss = 0.0
+                if (i >= 2 && tokens[i - 2].equals("-ss", ignoreCase = true)) {
+                    ss = tokens[i - 1].toDoubleOrNull() ?: 0.0
+                } else if (i >= 1 && tokens[i - 1].startsWith("-ss=", ignoreCase = true)) {
+                    ss = tokens[i - 1].substringAfter('=').toDoubleOrNull() ?: 0.0
+                }
+                if (inputCount == 0) input0Start = ss
+                else if (inputCount == 1) input1Start = ss
+                inputCount++
+            }
+        }
+        return Pair(input0Start, input1Start)
+    }
+
+    /**
+     * ৯৬টি ফাইলের সকল ভিডিও ফিল্টার (crop, scale, dar, flip, boxblur) কে Media3 Effect এ রূপান্তর করে
+     */
+    private fun parseChainToMedia3Effects(filterText: String): List<Effect> {
+        val effects = mutableListOf<Effect>()
+        val filters = filterText.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+
+        for (filter in filters) {
+            val name = filter.substringBefore('=').trim().lowercase()
+            val args = filter.substringAfter('=', "").trim()
+
+            when {
+                name == "hflip" -> {
+                    effects.add(ScaleAndRotateTransformation.Builder().setScale(-1f, 1f).build())
+                }
+                name == "vflip" -> {
+                    effects.add(ScaleAndRotateTransformation.Builder().setScale(1f, -1f).build())
+                }
+                name == "negate" -> {
+                    effects.add(RgbFilter.createInvertedFilter())
+                }
+                name == "boxblur" -> {
+                    effects.add(GaussianBlur(1.0f))
+                }
+                name == "setdar" && args.contains("21/9") -> {
+                    effects.add(DarEffect(21f / 9f))
+                }
+                name == "scale" -> {
+                    when {
+                        args.contains("trunc(trunc(iw*(4/3))/2)*2:ih") -> {
+                            effects.add(ScaleAndRotateTransformation.Builder().setScale(4f / 3f, 1f).build())
+                        }
+                        args.contains("iw*1.5:ih*1.5") || args.contains("trunc(iw*1.5):trunc(ih*1.5)") -> {
+                            effects.add(ScaleAndRotateTransformation.Builder().setScale(1.5f, 1.5f).build())
+                        }
+                        args.contains("iw*2:ih*2") -> {
+                            effects.add(ScaleAndRotateTransformation.Builder().setScale(2f, 2f).build())
+                        }
+                        args.contains("iw*3:ih*3") -> {
+                            effects.add(ScaleAndRotateTransformation.Builder().setScale(3f, 3f).build())
+                        }
+                        args.contains("trunc(iw*2):trunc(ih*1.5)") -> {
+                            effects.add(ScaleAndRotateTransformation.Builder().setScale(2f, 1.5f).build())
+                        }
+                    }
+                }
+                name == "crop" -> {
+                    if (args.contains("sin(")) {
+                        // Dynamic Sine Crop (e.g. 2G, 3C, 4C etc.)
+                        val wDiv = Regex("in_w\\s*/\\s*([0-9.]+)").find(args)?.groupValues?.get(1)?.toFloatOrNull() ?: 1.5f
+                        val hDiv = Regex("in_h\\s*/\\s*([0-9.]+)").find(args)?.groupValues?.get(1)?.toFloatOrNull() ?: 1.5f
+                        val parts = args.split(':')
+                        val xExpr = if (parts.size >= 3) parts[2] else "0.0"
+                        val yExpr = if (parts.size >= 4) parts[3] else "0.0"
+
+                        val glslX = AdvancedFfmpegMathCompiler.compileCropMathToGLSL(xExpr)
+                        val glslY = AdvancedFfmpegMathCompiler.compileCropMathToGLSL(yExpr)
+                        effects.add(UniversalMathCropEffect(wDiv, hDiv, glslX, glslY))
+                    } else if (args.contains("iw/3:ih/3:iw/2:ih/4")) {
+                        // Very Deep Zoom (2Za, 3Za, 4Za)
+                        effects.add(Crop(0f, 0.6667f, -0.1667f, 0.5f))
+                    } else if (args.contains("iw/2:ih/2:0:ih*0.3")) {
+                        // Multi zoom offset crop
+                        effects.add(Crop(-1f, 0f, -0.6f, 0.4f))
+                    } else if (args.contains("iw/2:ih/2:0:0")) {
+                        // Corner Zoom (2M, 3M, 4M)
+                        effects.add(Crop(-1f, 0f, 0f, 1f))
+                    } else if (args.contains("iw/1.5:ih/1.5")) {
+                        // Center Zoom Light (2Y, 3Y, 4Y)
+                        effects.add(Crop(-0.6667f, 0.6667f, -0.6667f, 0.6667f))
+                    } else if (args.contains("iw/2:ih/2")) {
+                        // Center Zoom (2K, 3K, 4K)
+                        effects.add(Crop(-0.5f, 0.5f, -0.5f, 0.5f))
+                    }
+                }
+            }
+        }
+        return effects
+    }
+
+    private fun buildEditedItem(input: File, startSeconds: Double, effects: List<Effect>, removeAudio: Boolean): EditedMediaItem {
+        val clip = MediaItem.ClippingConfiguration.Builder()
+            .setStartPositionMs(max(0L, (startSeconds * 1000.0).toLong()))
+            .build()
+        val mediaItem = MediaItem.Builder()
+            .setUri(Uri.fromFile(input))
+            .setClippingConfiguration(clip)
+            .build()
+        return EditedMediaItem.Builder(mediaItem)
+            .setEffects(Effects(emptyList(), effects))
+            .setRemoveAudio(removeAudio)
+            .build()
+    }
 
     override fun definition() = ModuleDefinition {
         Name("HybridFfmpeg")
@@ -267,16 +388,6 @@ class HybridFfmpegModule : Module() {
             val complexAudio = listOf("amix", "amovie", "amerge", "pan=", "asplit", "concat=")
             if (complexAudio.any { filter.contains(it, ignoreCase = true) }) return null
             return filter
-        }
-
-        fun runMedia3VideoBackend(inputFile: File, outputFile: File, command: String, removeAudio: Boolean = false): Map<String, Any>? {
-            val plan = FfmpegVideoCommandParser.parse(command)
-            if (!plan.supported) throw Exception("Parser Rejected: ${plan.reason}")
-            return Media3VideoTransformer.render(getContext(), inputFile, outputFile, plan, removeAudio)
-                .toMutableMap().apply {
-                    this["sourceFilter"] = plan.sourceFilter
-                    this["media3Plan"] = plan.effects.map { it::class.simpleName ?: "effect" }
-                }
         }
 
         fun extractFilterComplex(command: String): String? {
@@ -341,28 +452,124 @@ class HybridFfmpegModule : Module() {
             return selected.joinToString(";")
         }
 
-        fun runComplexOverlayHybridBackend(inputFile: File, outputFile: File, command: String, plan: FfmpegComplexCommandParser.OverlayPlan): Map<String, Any>? {
+        /**
+         * ৯৬টি কমান্ডের জন্য ডাইনামিক মাল্টি-ওভারলে ও গ্রাফ এক্সিকিউটর
+         */
+        fun tryRunAdvancedMedia3Graph(inputFile: File, outputFile: File, command: String): Map<String, Any>? {
+            val graph = extractFilterComplex(command) ?: return null
+            val statements = splitComplexStatements(graph)
+            val overlayStatements = statements.filter { it.contains("overlay", ignoreCase = true) }
+            if (overlayStatements.isEmpty()) return null
+
+            // ১. অডিও এক্সট্র্যাকশন ও ব্যাকগ্রাউন্ড প্রসেসিং
             val hasAudio = hasAudioProcessing(command)
             val audioGraph = if (hasAudio) extractComplexAudioGraph(command) else null
-            if (hasAudio && audioGraph == null) throw Exception("Parser Rejected: Complex audio extraction failed")
+            val audioFile = File(getContext().cacheDir, "hve_audio_pipe_${System.currentTimeMillis()}.m4a")
+            var audioProduced = false
 
-            val audioFile = File(getContext().cacheDir, "hve_composite_audio_${System.currentTimeMillis()}.m4a")
-            try {
-                if (audioGraph != null) {
-                    val audioCommand = "-y -i \"${inputFile.absolutePath}\" -filter_complex \"$audioGraph\" -map \"[hve_aout]\" -vn -c:a aac -b:a 192k \"${audioFile.absolutePath}\""
-                    val audioSession = FFmpegKit.execute(audioCommand)
-                    if (!ReturnCode.isSuccess(audioSession.returnCode)) throw Exception(audioSession.getAllLogsAsString().ifBlank { "Complex audio processing failed" })
+            if (audioGraph != null) {
+                val audioCommand = "-y -i \"${inputFile.absolutePath}\" -filter_complex \"$audioGraph\" -map \"[hve_aout]\" -vn -c:a aac -b:a 192k \"${audioFile.absolutePath}\""
+                val audioSession = FFmpegKit.execute(audioCommand)
+                if (ReturnCode.isSuccess(audioSession.returnCode)) {
+                    audioProduced = true
                 }
-                val media3 = Media3OverlayComposer.render(getContext(), inputFile, outputFile, plan, removeAudio = audioGraph != null, externalAudioFile = audioFile.takeIf { audioGraph != null && it.exists() })
-                return media3.toMutableMap().apply {
-                    this["videoBackend"] = "Media3 Composition + OpenGL ES"
-                    this["audioBackend"] = if (audioGraph != null) "FFmpegKit -> Media3 audio sequence" else "Media3 passthrough"
-                    this["hybridMode"] = if (audioGraph != null) "GPU_COMPOSITION+FFMPEG_AUDIO_IN_COMPOSITION" else "GPU_COMPOSITION"
-                    this["muxBackend"] = "Media3 Transformer muxer"
+            }
+
+            try {
+                // ২. ইনপুট টাইমিং বিশ্লেষণ (-ss)
+                val (in0Start, in1Start) = extractInputStartTimes(command)
+
+                // ৩. লেবেল ও ব্রাঞ্চ ম্যাপ তৈরি
+                val labelEffects = mutableMapOf<String, List<Effect>>()
+                val labelSourceInput = mutableMapOf<String, Int>()
+
+                for (stmt in statements) {
+                    if (stmt.contains("overlay", ignoreCase = true)) continue
+                    val match = Regex("\\[(\\d+):v\\](.*)\\[([a-zA-Z0-9_]+)\\]").find(stmt)
+                    if (match != null) {
+                        val inputIdx = match.groupValues[1].toInt()
+                        val filterText = match.groupValues[2]
+                        val outLabel = match.groupValues[3]
+                        labelEffects[outLabel] = parseChainToMedia3Effects(filterText)
+                        labelSourceInput[outLabel] = inputIdx
+                        continue
+                    }
+                    val intermediateMatch = Regex("\\[([a-zA-Z0-9_]+)\\](.*)\\[([a-zA-Z0-9_]+)\\]").find(stmt)
+                    if (intermediateMatch != null) {
+                        val inLabel = intermediateMatch.groupValues[1]
+                        val filterText = intermediateMatch.groupValues[2]
+                        val outLabel = intermediateMatch.groupValues[3]
+                        val combined = (labelEffects[inLabel] ?: emptyList()) + parseChainToMedia3Effects(filterText)
+                        labelEffects[outLabel] = combined
+                        labelSourceInput[outLabel] = labelSourceInput[inLabel] ?: 0
+                    }
+                }
+
+                // ৪. বেস লেয়ার নির্ধারণ (প্রথম ওভারলের ব্যাকগ্রাউন্ড)
+                val firstOverlay = overlayStatements.first()
+                val firstLabels = Regex("\\[([^]]+)\\]").findAll(firstOverlay).map { it.groupValues[1] }.toList()
+                val baseLabel = firstLabels.getOrNull(0) ?: "0:v"
+                val baseInputIdx = when {
+                    baseLabel == "0:v" -> 0
+                    baseLabel == "1:v" -> 1
+                    else -> labelSourceInput[baseLabel] ?: 0
+                }
+                val baseStartSec = if (baseInputIdx == 1) in1Start else in0Start
+                val baseEffects = labelEffects[baseLabel] ?: emptyList()
+                val baseItem = buildEditedItem(inputFile, baseStartSec, baseEffects, removeAudio = true)
+
+                // ৫. ওভারলে নোড তৈরি (১টি বা মাল্টিপল ওভারলে)
+                val overlayNodes = mutableListOf<MultiSequenceOverlayCompositor.OverlayNode>()
+                for ((idx, stmt) in overlayStatements.withIndex()) {
+                    val labels = Regex("\\[([^]]+)\\]").findAll(stmt).map { it.groupValues[1] }.toList()
+                    val topLabel = labels.getOrNull(1) ?: continue
+                    val topInputIdx = when {
+                        topLabel == "0:v" -> 0
+                        topLabel == "1:v" -> 1
+                        else -> labelSourceInput[topLabel] ?: 1
+                    }
+                    val topStartSec = if (topInputIdx == 1) in1Start else in0Start
+                    val topEffects = labelEffects[topLabel] ?: emptyList()
+                    val topItem = buildEditedItem(inputFile, topStartSec, topEffects, removeAudio = true)
+
+                    // enable এক্সপ্রেশন এক্সট্র্যাক্ট করা
+                    val enableExpr = Regex("enable='([^']+)'").find(stmt)?.groupValues?.get(1)
+                        ?: Regex("enable=([a-zA-Z0-9_()*.,]+)").find(stmt)?.groupValues?.get(1)
+                        ?: ""
+
+                    overlayNodes.add(
+                        MultiSequenceOverlayCompositor.OverlayNode(
+                            enableExpression = enableExpr,
+                            zIndex = idx + 1,
+                            editedItem = topItem
+                        )
+                    )
+                }
+
+                // ৬. Media3 GPU মাল্টি-লেয়ার কম্পোজিটর কল
+                return MultiSequenceOverlayCompositor.renderMultiGraph(
+                    context = getContext(),
+                    outputFile = outputFile,
+                    baseItem = baseItem,
+                    overlayNodes = overlayNodes,
+                    externalAudioFile = if (audioProduced) audioFile else null
+                ).toMutableMap().apply {
+                    this["audioBackend"] = if (audioProduced) "FFmpegKit -> Media3 audio sequence" else "None"
+                    this["overlayCount"] = overlayNodes.size
                 }
             } finally {
-                audioFile.delete()
+                if (audioFile.exists()) audioFile.delete()
             }
+        }
+
+        fun runMedia3VideoBackend(inputFile: File, outputFile: File, command: String, removeAudio: Boolean = false): Map<String, Any>? {
+            val plan = FfmpegVideoCommandParser.parse(command)
+            if (!plan.supported) throw Exception("Parser Rejected: ${plan.reason}")
+            return Media3VideoTransformer.render(getContext(), inputFile, outputFile, plan, removeAudio)
+                .toMutableMap().apply {
+                    this["sourceFilter"] = plan.sourceFilter
+                    this["media3Plan"] = plan.effects.map { it::class.simpleName ?: "effect" }
+                }
         }
 
         fun runHybridVideoAudioBackend(inputFile: File, videoFile: File, audioFile: File, outputFile: File, command: String): Map<String, Any>? {
@@ -396,10 +603,13 @@ class HybridFfmpegModule : Module() {
                 gpuInfo["fallbackSafetyPolicy"] = if (shouldPreferCpuFallback(finalCommand)) "CPU_SAFE_FOR_COMPLEX_OR_DYNAMIC_GRAPH" else "MEDIA_CODEC_ALLOWED"
 
                 try {
-                    val complexOverlayPlan = FfmpegComplexCommandParser.parse(finalCommand)
-                    val media3Result = if (complexOverlayPlan?.supported == true) {
-                        runComplexOverlayHybridBackend(inputFile, outputFile, finalCommand, complexOverlayPlan)
+                    // ১. ৯৬ ব্যাচ ফাইলের সকল মাল্টি ও ডায়নামিক ওভারলে টেস্ট করা
+                    val advancedMedia3Result = tryRunAdvancedMedia3Graph(inputFile, outputFile, finalCommand)
+                    
+                    val media3Result = if (advancedMedia3Result != null) {
+                        advancedMedia3Result
                     } else {
+                        // ২. সিম্পল -vf ফিল্টার টেস্ট করা
                         val hasAudioFilter = hasAudioProcessing(finalCommand)
                         if (hasAudioFilter) {
                             val videoOnlyFile = File(getContext().cacheDir, "hve_video_${System.currentTimeMillis()}.mp4")
@@ -412,6 +622,7 @@ class HybridFfmpegModule : Module() {
                             runMedia3VideoBackend(inputFile, outputFile, finalCommand, false)
                         }
                     }
+
                     if (media3Result != null) {
                         val result = media3Result.toMutableMap()
                         val publishedUri = publishVideoToMediaStore(outputFile)
@@ -421,22 +632,22 @@ class HybridFfmpegModule : Module() {
                         result["inputName"] = inputFile.name
                         result["outputUri"] = publishedUri?.toString() ?: ""
                         result["gpuRequested"] = true
-                        if (!result.containsKey("hybridMode")) result["hybridMode"] = "GPU_VIDEO"
+                        if (!result.containsKey("hybridMode")) result["hybridMode"] = "GPU_MEDIA3_PIPELINE"
                         if (!result.containsKey("audioBackend")) result["audioBackend"] = "Media3 passthrough"
                         promise.resolve(result)
                         return@AsyncFunction
                     }
                 } catch (gpuError: Throwable) {
-                    // FIXED: Extract the deeply nested root cause generated by Media3's GlUtil
                     val rootCause = generateSequence(gpuError) { it.cause }.last()
                     val errMsg = rootCause.message ?: rootCause.toString()
-                    
+
                     gpuInfo["gpuFallback"] = true
                     gpuInfo["gpuFallbackReason"] = errMsg
                     gpuInfo["fallbackReasonCode"] = classifyFallbackReason(finalCommand, errMsg)
                     gpuInfo["videoBackend"] = "FFmpegKit Fallback (Media3 Crash: $errMsg)"
                 }
 
+                // ফলব্যাক মেকানিজম (যদি হার্ডওয়্যার কোনো কারণে ফেইল করে)
                 val fallbackCpuSafe = shouldPreferCpuFallback(finalCommand)
 
                 fun resolveFallbackResult(session: com.arthenica.ffmpegkit.Session, usedCommand: String, encoderStrategy: String) {

@@ -1,3 +1,4 @@
+// START OF FILE: UniversalMathCropEffect.kt
 package expo.modules.hybridffmpeg
 
 import android.content.Context
@@ -10,36 +11,25 @@ import androidx.media3.effect.BaseGlShaderProgram
 import androidx.media3.effect.GlEffect
 import androidx.media3.effect.GlShaderProgram
 
-class DynamicCropEffect(
+class UniversalMathCropEffect(
     private val widthDivisor: Float,
     private val heightDivisor: Float,
-    private val xFreq: Float,
-    private val yFreq: Float,
-    private val rawExpression: String? = null
+    private val glslXMath: String,
+    private val glslYMath: String
 ) : GlEffect {
     override fun toGlShaderProgram(context: Context, useHdr: Boolean): GlShaderProgram {
-        return DynamicCropShaderProgram(context, widthDivisor, heightDivisor, xFreq, yFreq, rawExpression)
+        return UniversalMathCropShaderProgram(widthDivisor, heightDivisor, glslXMath, glslYMath)
     }
 }
 
-private class DynamicCropShaderProgram(
-    context: Context,
+private class UniversalMathCropShaderProgram(
     private val widthDivisor: Float,
     private val heightDivisor: Float,
-    private val xFreq: Float,
-    private val yFreq: Float,
-    rawExpression: String?
+    private val glslXMath: String,
+    private val glslYMath: String
 ) : BaseGlShaderProgram(false, 1) {
 
     private val glProgram: GlProgram
-    private val transpileResult = rawExpression?.let { FfmpegMathTranspiler.transpile(it) } ?: ""
-
-    private val quadCoords = floatArrayOf(
-        -1.0f, -1.0f, 0.0f, 1.0f,
-         1.0f, -1.0f, 0.0f, 1.0f,
-        -1.0f,  1.0f, 0.0f, 1.0f,
-         1.0f,  1.0f, 0.0f, 1.0f
-    )
 
     init {
         val vertexShader = """
@@ -51,37 +41,28 @@ private class DynamicCropShaderProgram(
             }
         """.trimIndent()
 
-        // Dynamic Fragment Shader powered by FfmpegMathTranspiler
+        // ডায়নামিক গাণিতিক ইকুয়েশন ইনজেক্ট করা হচ্ছে
         val fragmentShader = """
             precision mediump float;
             uniform sampler2D uTexSampler;
             uniform float uTime;
-            uniform float uWidth;
-            uniform float uHeight;
-            uniform float uOutWidth;
-            uniform float uOutHeight;
+            uniform float uWidthDiv;
+            uniform float uHeightDiv;
             varying vec2 vTexSamplingCoord;
 
             void main() {
-                float safeW = uWidth > 0.0 ? uWidth : 1.0;
-                float safeH = uHeight > 0.0 ? uHeight : 1.0;
-                float cropW = 1.0 / safeW;
-                float cropH = 1.0 / safeH;
-
-                float offsetX = 0.0;
-                float offsetY = 0.0;
-
-                // If a custom expression was passed, inject its evaluated math here
-                // Otherwise fallback to default sin waves
-                if (uWidth > 0.0) {
-                    // Placeholder for dynamic evaluation mapping
-                    offsetX = sin(uTime * 0.5) * 0.2;
-                    offsetY = sin(uTime * 0.2) * 0.2;
-                }
+                float safeW = uWidthDiv > 0.0 ? uWidthDiv : 1.0;
+                float safeH = uHeightDiv > 0.0 ? uHeightDiv : 1.0;
+                float uCropW = 1.0 / safeW;
+                float uCropH = 1.0 / safeH;
+                
+                // AdvancedFfmpegMathCompiler থেকে জেনারেট করা ডায়নামিক ম্যাথ 
+                float offsetX = $glslXMath;
+                float offsetY = $glslYMath;
 
                 vec2 uv = vec2(
-                    vTexSamplingCoord.x,
-                    vTexSamplingCoord.y
+                    offsetX + vTexSamplingCoord.x * uCropW,
+                    offsetY + vTexSamplingCoord.y * uCropH
                 );
 
                 if (uv.x < 0.0) uv.x = 0.0;
@@ -106,16 +87,17 @@ private class DynamicCropShaderProgram(
         try {
             glProgram.use()
             glProgram.setSamplerTexIdUniform("uTexSampler", texId, 0)
+            
+            // Standard Full-screen Quad
+            val quadCoords = floatArrayOf(-1.0f, -1.0f, 0.0f, 1.0f, 1.0f, -1.0f, 0.0f, 1.0f, -1.0f,  1.0f, 0.0f, 1.0f, 1.0f,  1.0f, 0.0f, 1.0f)
             glProgram.setBufferAttribute("aFramePosition", quadCoords, 4)
 
-            try { glProgram.setFloatUniform("uTime", presentationTimeUs / 1_000_000f) } catch(_: Exception){}
-            try { glProgram.setFloatUniform("uWidth", 1080f) } catch(_: Exception){}
-            try { glProgram.setFloatUniform("uHeight", 1920f) } catch(_: Exception){}
-            try { glProgram.setFloatUniform("uOutWidth", 1080f) } catch(_: Exception){}
-            try { glProgram.setFloatUniform("uOutHeight", 1920f) } catch(_: Exception){}
-
+            glProgram.setFloatUniform("uTime", presentationTimeUs / 1_000_000f)
+            glProgram.setFloatUniform("uWidthDiv", widthDivisor)
+            glProgram.setFloatUniform("uHeightDiv", heightDivisor)
+            
             glProgram.bindAttributesAndUniforms()
-
+            
             GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
@@ -126,10 +108,7 @@ private class DynamicCropShaderProgram(
     }
 
     override fun release() {
-        try {
-            glProgram.delete()
-        } finally {
-            super.release()
-        }
+        super.release()
+        try { glProgram.delete() } catch(_: Exception){}
     }
 }
