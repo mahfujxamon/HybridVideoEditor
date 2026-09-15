@@ -361,7 +361,6 @@ class HybridFfmpegModule : Module() {
             return FfmpegCommandTokenizer.findOptionValue(command, "-filter_complex")?.takeIf { it.isNotBlank() }
         }
         
-        // 🚀 METADATA EXTRACTOR
         fun extractMetadataString(command: String): String {
             return Regex("-metadata\\s+[a-zA-Z0-9_]+=(?:\"[^\"]*\"|'[^']*'|\\S+)")
                 .findAll(command)
@@ -528,17 +527,18 @@ class HybridFfmpegModule : Module() {
 
         fun runMedia3VideoBackend(inputFile: File, outputFile: File, command: String, removeAudio: Boolean = false): Map<String, Any>? {
             val plan = FfmpegVideoCommandParser.parse(command)
-            if (!plan.supported) throw Exception("Parser Rejected: ${plan.reason}")
+            if (!plan.supported) throw Exception("Parser Rejected: ${plan.reason ?: "Unknown"}")
             return Media3VideoTransformer.render(getContext(), inputFile, outputFile, plan, removeAudio)
                 .toMutableMap().apply {
-                    this["sourceFilter"] = plan.sourceFilter
+                    // THE GOLDEN FIX: Ensuring no null String? is inserted into Map<String, Any>
+                    this["sourceFilter"] = plan.sourceFilter ?: "None" 
                     this["media3Plan"] = plan.effects.map { it::class.simpleName ?: "effect" }
                 }
         }
 
         fun runHybridVideoAudioBackend(inputFile: File, videoFile: File, audioFile: File, outputFile: File, command: String): Map<String, Any>? {
             val plan = FfmpegVideoCommandParser.parse(command)
-            if (!plan.supported) throw Exception("Parser Rejected: ${plan.reason}")
+            if (!plan.supported) throw Exception("Parser Rejected: ${plan.reason ?: "Unknown"}")
             val audioFilter = extractSimpleAudioFilter(command) ?: throw Exception("Parser Rejected: Unsupported audio filter")
 
             if (audioFile.exists()) audioFile.delete()
@@ -590,10 +590,8 @@ class HybridFfmpegModule : Module() {
                         val metadataStr = extractMetadataString(finalCommand)
                         var metadataApplied = false
 
-                        // 🚀 SMART METADATA REMUX: GPU রেন্ডার হওয়ার পর মেটাডেটা বসানো হচ্ছে
                         if (metadataStr.isNotBlank()) {
                             val remuxFile = File(getContext().cacheDir, "hve_metadata_${System.currentTimeMillis()}.mp4")
-                            // -c copy ব্যবহার করায় নতুন করে রেন্ডার হবে না, চোখের পলকে সেভ হবে!
                             val remuxCmd = "-y -i \"${outputFile.absolutePath}\" -c copy -map 0 $metadataStr \"${remuxFile.absolutePath}\""
                             val session = FFmpegKit.execute(remuxCmd)
                             if (ReturnCode.isSuccess(session.returnCode)) {
