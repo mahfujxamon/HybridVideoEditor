@@ -30,17 +30,22 @@ private class DynamicCropShaderProgram(
 ) : BaseGlShaderProgram(false, 1) {
 
     private val glProgram: GlProgram
+    
+    private val quadCoords = floatArrayOf(
+        -1.0f, -1.0f, 0.0f, 1.0f,
+         1.0f, -1.0f, 0.0f, 1.0f,
+        -1.0f,  1.0f, 0.0f, 1.0f,
+         1.0f,  1.0f, 0.0f, 1.0f
+    )
 
     init {
-        // FIXED: Added aTexSamplingCoord so Media3's internal binder doesn't crash when searching for it
+        // রিভার্ট করে সিম্পল এবং সঠিক ভার্টেক্স শেডারে ফিরে আসলাম
         val vertexShader = """
             attribute vec4 aFramePosition;
-            attribute vec4 aTexSamplingCoord;
             varying vec2 vTexSamplingCoord;
             void main() {
                 gl_Position = aFramePosition;
-                // Safely combining both to keep the compiler happy
-                vTexSamplingCoord = aTexSamplingCoord.xy + (aFramePosition.xy * 0.0);
+                vTexSamplingCoord = (aFramePosition.xy + vec2(1.0, 1.0)) * 0.5;
             }
         """.trimIndent()
 
@@ -83,7 +88,8 @@ private class DynamicCropShaderProgram(
         """.trimIndent()
 
         glProgram = try {
-            GlProgram(context, vertexShader, fragmentShader)
+            // THE GOLDEN FIX: context প্যারামিটারটি রিমুভ করে দিয়েছি!
+            GlProgram(vertexShader, fragmentShader)
         } catch (t: Throwable) {
             throw VideoFrameProcessingException(t)
         }
@@ -96,15 +102,18 @@ private class DynamicCropShaderProgram(
             glProgram.use()
             glProgram.setSamplerTexIdUniform("uTexSampler", texId, 0)
             
+            glProgram.setBufferAttribute("aFramePosition", quadCoords, 4)
+
             try { glProgram.setFloatUniform("uTime", presentationTimeUs / 1_000_000f) } catch(_: Exception){}
             try { glProgram.setFloatUniform("uWidthDiv", widthDivisor) } catch(_: Exception){}
             try { glProgram.setFloatUniform("uHeightDiv", heightDivisor) } catch(_: Exception){}
             try { glProgram.setFloatUniform("uXFreq", xFreq) } catch(_: Exception){}
             try { glProgram.setFloatUniform("uYFreq", yFreq) } catch(_: Exception){}
             
-            // Media3 internally binds the standard screen quad buffers here
             glProgram.bindAttributesAndUniforms()
             
+            GLES20.glClearColor(0.0f, 0.0f, 0.0f, 1.0f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
             GlUtil.checkGlError()
         } catch (t: Throwable) {
