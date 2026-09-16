@@ -519,6 +519,9 @@ class HybridFfmpegModule : Module() {
                 ).toMutableMap().apply {
                     this["audioBackend"] = if (audioProduced) "FFmpegKit -> Media3 audio sequence" else "None"
                     this["overlayCount"] = overlayNodes.size
+                    // LOGGING SYSTEM UPDATE
+                    this["appliedGpuEffects"] = "Multi-Layer Composition (${overlayNodes.size} Overlays)"
+                    this["executionStatus"] = "GPU_SUCCESS"
                 }
             } finally {
                 if (audioFile.exists()) audioFile.delete()
@@ -530,9 +533,11 @@ class HybridFfmpegModule : Module() {
             if (!plan.supported) throw Exception("Parser Rejected: ${plan.reason ?: "Unknown"}")
             return Media3VideoTransformer.render(getContext(), inputFile, outputFile, plan, removeAudio)
                 .toMutableMap().apply {
-                    // THE GOLDEN FIX: Ensuring no null String? is inserted into Map<String, Any>
                     this["sourceFilter"] = plan.sourceFilter ?: "None" 
                     this["media3Plan"] = plan.effects.map { it::class.simpleName ?: "effect" }
+                    // LOGGING SYSTEM UPDATE
+                    this["appliedGpuEffects"] = plan.effects.map { it::class.simpleName ?: "effect" }.joinToString(", ")
+                    this["executionStatus"] = "GPU_SUCCESS"
                 }
         }
 
@@ -553,6 +558,9 @@ class HybridFfmpegModule : Module() {
                 this["videoBackend"] = "Media3 Transformer + OpenGL ES"
                 this["audioBackend"] = "FFmpegKit (-af) -> Media3 audio sequence"
                 this["hybridMode"] = "GPU_VIDEO+FFMPEG_AUDIO_IN_COMPOSITION"
+                // LOGGING SYSTEM UPDATE
+                this["appliedGpuEffects"] = plan.effects.map { it::class.simpleName ?: "effect" }.joinToString(", ") + ", Audio Filter"
+                this["executionStatus"] = "GPU_SUCCESS (with Audio)"
             }
         }
 
@@ -627,6 +635,10 @@ class HybridFfmpegModule : Module() {
                     gpuInfo["gpuFallbackReason"] = errMsg
                     gpuInfo["fallbackReasonCode"] = classifyFallbackReason(finalCommand, errMsg)
                     gpuInfo["videoBackend"] = "FFmpegKit Fallback (Media3 Crash: $errMsg)"
+                    
+                    // LOGGING SYSTEM UPDATE: Fallback information
+                    gpuInfo["executionStatus"] = "GPU_FAILED_FALLING_BACK"
+                    gpuInfo["failedEffectsOrReason"] = errMsg
                 }
 
                 val fallbackCpuSafe = shouldPreferCpuFallback(finalCommand)
@@ -647,7 +659,11 @@ class HybridFfmpegModule : Module() {
                             "videoBackend" to (gpuInfo["videoBackend"]?.toString() ?: "FFmpegKit fallback"),
                             "fallbackEncoderStrategy" to encoderStrategy,
                             "audioBackend" to "FFmpegKit",
-                            "message" to "Universal FFmpeg fallback render completed"
+                            "message" to "Universal FFmpeg fallback render completed",
+                            // LOGGING SYSTEM UPDATE: Final status sent to App UI
+                            "appliedGpuEffects" to "None (Processed completely by CPU/FFmpeg)",
+                            "executionStatus" to (gpuInfo["executionStatus"] ?: "BYPASSED_GPU"),
+                            "failedEffectsOrReason" to (gpuInfo["failedEffectsOrReason"] ?: "Graph too complex for GPU")
                         )
                         result.putAll(gpuInfo)
                         promise.resolve(result)
