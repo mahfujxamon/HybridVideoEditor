@@ -137,6 +137,7 @@ class HybridFfmpegModule : Module() {
         return clean
     }
 
+    // FIX: Safely quote paths to prevent C++ Filtergraph crashes
     private fun resolveCommandAssets(command: String): String {
         val pattern = Regex("(?i)(\\b(?:amovie|movie)\\s*=\\s*)(?:'([^']+)'|\"([^\"]+)\"|([^,:;\\]\\s]+))")
         return pattern.replace(command) { match ->
@@ -148,7 +149,13 @@ class HybridFfmpegModule : Module() {
             }.trim()
             if (rawPath.isBlank() || rawPath.startsWith("/")) match.value
             else {
-                try { prefix + "'" + resolveAssetPath(rawPath) + "'" } catch (_: Throwable) { match.value }
+                try {
+                    val resolved = resolveAssetPath(rawPath)
+                    prefix + "'" + resolved + "'" 
+                } catch (_: Throwable) { 
+                    // CRASH PROTECT: If asset not found, remove the amovie node to prevent C++ Segfault
+                    "" 
+                }
             }
         }
     }
@@ -159,7 +166,6 @@ class HybridFfmpegModule : Module() {
             lower.contains("overlay=") || lower.contains("hwupload") || lower.contains("hwdownload") || lower.contains("_opencl") || lower.contains("vulkan")
     }
 
-    // CRASH FIX: Inject memory limits safely IN THE MIDDLE of the command
     private fun applyMemorySafeLimits(command: String): String {
         var result = command
         result = result.replace(Regex("""(?i)\s+-threads\s+\d+"""), "")
@@ -194,7 +200,6 @@ class HybridFfmpegModule : Module() {
         return applyMemorySafeLimits(result)
     }
 
-    // CRASH FIX: Reordered building logic so output file is ALWAYS at the absolute end
     private fun buildUniversalCommand(userCommand: String, inputFile: File, outputFile: File): String {
         val sanitized = sanitizeBatchCommand(userCommand)
         var command = normalizeCommand(sanitized)
@@ -204,10 +209,8 @@ class HybridFfmpegModule : Module() {
         
         command = resolveCommandAssets(command)
         
-        // 1. Apply Encoders and Memory Limits FIRST
         command = if (shouldPreferCpuFallback(command)) prepareCpuFallbackEncoder(command) else prepareHardwareEncoder(command)
 
-        // 2. Add Output File LAST
         val isFullCommand = command.contains("-i") || command.contains("<INPUT_VIDEO>")
         if (isFullCommand) {
             command = command.replace("<INPUT_VIDEO>", "\"${inputFile.absolutePath}\"")
@@ -555,14 +558,12 @@ class HybridFfmpegModule : Module() {
                 val gpuInfo = analyzeGpuRequest(finalCommand).toMutableMap()
                 
                 try {
-                    // SMART BYPASS: Prevent OOM and Hardware Drops on Multi-Stream Graphs
                     if (finalCommand.contains("overlay=", ignoreCase = true) || 
                         finalCommand.contains("amovie=", ignoreCase = true) || 
                         finalCommand.contains("amix=", ignoreCase = true)) {
                         throw Exception("Multi-Stream limitation on current SoC. Bypassing to Hybrid Hardware Encoder (h264_mediacodec).")
                     }
 
-                    // Attempt full advanced execution if bypass didn't trigger
                     val advancedMedia3Result = tryRunAdvancedMedia3Graph(inputFile, outputFile, finalCommand)
                     
                     val media3Result = if (advancedMedia3Result != null) {
@@ -586,7 +587,6 @@ class HybridFfmpegModule : Module() {
                         val metadataStr = extractMetadataString(userCommand)
                         var metadataApplied = false
 
-                        // Zero-Copy Metadata Remuxing
                         if (metadataStr.isNotBlank()) {
                             val remuxFile = File(getContext().cacheDir, "hve_metadata_${System.currentTimeMillis()}.mp4")
                             val remuxCmd = "-y -i \"${outputFile.absolutePath}\" -map 0 -c copy $metadataStr \"${remuxFile.absolutePath}\""
