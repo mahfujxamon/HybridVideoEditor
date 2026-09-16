@@ -159,17 +159,22 @@ class HybridFfmpegModule : Module() {
             lower.contains("overlay=") || lower.contains("hwupload") || lower.contains("hwdownload") || lower.contains("_opencl") || lower.contains("vulkan")
     }
 
-    // NEW: Memory Safe Shield for Camera Videos
+    // CRASH FIX: Inject memory limits safely IN THE MIDDLE of the command
     private fun applyMemorySafeLimits(command: String): String {
         var result = command
-        if (!result.contains("-pix_fmt", ignoreCase = true)) {
-            result += " -pix_fmt yuv420p"
-        }
         result = result.replace(Regex("""(?i)\s+-threads\s+\d+"""), "")
-        result += " -threads 2" 
         result = result.replace(Regex("""(?i)\s+-preset\s+\S+"""), "")
         result = result.replace(Regex("""(?i)\s+-crf\s+\S+"""), "")
         result = result.replace(Regex("""(?i)\s+-tune\s+\S+"""), "")
+        
+        val vcodecRegex = Regex("""(?i)(-c:v|-vcodec|-codec:v)\s+\S+""")
+        if (vcodecRegex.containsMatchIn(result)) {
+            val pixFmt = if (!result.contains("-pix_fmt", ignoreCase = true)) " -pix_fmt yuv420p" else ""
+            result = result.replaceFirst(vcodecRegex, "$0$pixFmt -threads 2")
+        } else {
+            val pixFmt = if (!result.contains("-pix_fmt", ignoreCase = true)) " -pix_fmt yuv420p" else ""
+            result += "$pixFmt -threads 2"
+        }
         return result.trim()
     }
 
@@ -189,23 +194,32 @@ class HybridFfmpegModule : Module() {
         return applyMemorySafeLimits(result)
     }
 
+    // CRASH FIX: Reordered building logic so output file is ALWAYS at the absolute end
     private fun buildUniversalCommand(userCommand: String, inputFile: File, outputFile: File): String {
         val sanitized = sanitizeBatchCommand(userCommand)
         var command = normalizeCommand(sanitized)
         command = command.replace("%%t", "\"${inputFile.absolutePath}\"")
         command = command.replace("%~nt", inputFile.nameWithoutExtension)
         command = command.replace(Regex("""(?i)"?_output[\\/][^"\s]+"?"""), "")
+        
+        command = resolveCommandAssets(command)
+        
+        // 1. Apply Encoders and Memory Limits FIRST
+        command = if (shouldPreferCpuFallback(command)) prepareCpuFallbackEncoder(command) else prepareHardwareEncoder(command)
 
+        // 2. Add Output File LAST
         val isFullCommand = command.contains("-i") || command.contains("<INPUT_VIDEO>")
         if (isFullCommand) {
             command = command.replace("<INPUT_VIDEO>", "\"${inputFile.absolutePath}\"")
-            command = command.replace("<OUTPUT_VIDEO>", "\"${outputFile.absolutePath}\"")
-            if (!command.contains(outputFile.absolutePath)) command = "$command \"${outputFile.absolutePath}\""
+            if (command.contains("<OUTPUT_VIDEO>")) {
+                command = command.replace("<OUTPUT_VIDEO>", "\"${outputFile.absolutePath}\"")
+            } else if (!command.contains(outputFile.absolutePath)) {
+                command = "$command \"${outputFile.absolutePath}\""
+            }
         } else {
             command = "-y -i \"${inputFile.absolutePath}\" $command \"${outputFile.absolutePath}\""
         }
-        command = resolveCommandAssets(command)
-        command = if (shouldPreferCpuFallback(command)) prepareCpuFallbackEncoder(command) else prepareHardwareEncoder(command)
+        
         return command.trim()
     }
 
@@ -541,14 +555,14 @@ class HybridFfmpegModule : Module() {
                 val gpuInfo = analyzeGpuRequest(finalCommand).toMutableMap()
                 
                 try {
-                    // SMART BYPASS: Prevent OOM and Hardware Drops on Multi-Stream Graphs (Exynos/MediaTek protection)
+                    // SMART BYPASS: Prevent OOM and Hardware Drops on Multi-Stream Graphs
                     if (finalCommand.contains("overlay=", ignoreCase = true) || 
                         finalCommand.contains("amovie=", ignoreCase = true) || 
                         finalCommand.contains("amix=", ignoreCase = true)) {
                         throw Exception("Multi-Stream limitation on current SoC. Bypassing to Hybrid Hardware Encoder (h264_mediacodec).")
                     }
 
-                    // Attempt full advanced execution if bypass didn't trigger (Future-proofing for Snapdragon)
+                    // Attempt full advanced execution if bypass didn't trigger
                     val advancedMedia3Result = tryRunAdvancedMedia3Graph(inputFile, outputFile, finalCommand)
                     
                     val media3Result = if (advancedMedia3Result != null) {
@@ -623,6 +637,7 @@ class HybridFfmpegModule : Module() {
                             "executionStatus" to (gpuInfo["executionStatus"] ?: "BYPASSED_GPU"),
                             "failedEffectsOrReason" to (gpuInfo["failedEffectsOrReason"] ?: "Multi-Graph Hardware Limitation")
                         )
+                        result.putAll(gpuInfo)
                         promise.resolve(result)
                     } else {
                         val diagnostic = session.getAllLogsAsString().takeLast(5000)
