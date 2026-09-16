@@ -1,7 +1,5 @@
 package expo.modules.hybridffmpeg
 
-import android.util.Log
-
 object FfmpegVideoCommandParser {
     class VideoPlan(
         val supported: Boolean,
@@ -22,11 +20,11 @@ object FfmpegVideoCommandParser {
         class GaussianBlur(val sigma: Float) : EffectSpec()
         class DynamicCrop(val widthDivisor: Float, val heightDivisor: Float, val xFreq: Float, val yFreq: Float) : EffectSpec()
         class AiCustomShader(val shaderPath: String) : EffectSpec()
+        class DarEffectSpec(val ratio: Float) : EffectSpec() // Added SetDar mapping
     }
 
     fun parse(command: String): VideoPlan {
         val filter = FfmpegCommandTokenizer.findOptionValue(command, "-vf") ?: return VideoPlan(false, "No -vf flag found")
-        
         val effectsList = mutableListOf<EffectSpec>()
         val filters = filter.split(',').map { it.trim() }.filter { it.isNotEmpty() }
 
@@ -35,36 +33,24 @@ object FfmpegVideoCommandParser {
             val args = f.substringAfter('=', "").trim()
 
             when (name) {
-                "ai_shader" -> effectsList.add(EffectSpec.AiCustomShader(args))
+                "ai_shader" -> effectsList.add(EffectSpec.AiCustomShader(args)) // TASK 5
                 "hflip" -> effectsList.add(EffectSpec.HFlip)
                 "vflip" -> effectsList.add(EffectSpec.VFlip)
                 "negate" -> effectsList.add(EffectSpec.Negate)
                 "boxblur" -> effectsList.add(EffectSpec.GaussianBlur(1.0f))
+                "setdar" -> if (args.contains("21/9")) effectsList.add(EffectSpec.DarEffectSpec(21f / 9f)) else return VideoPlan(false, "Unsupported setdar: $args", filter)
                 "crop" -> {
-                    // জিপিইউ যদি ক্রপ বুঝতে না পারে, তবে রিজেক্ট করে FFmpeg-এ পাঠানো হবে
-                    if (args.contains("sin(")) {
-                        effectsList.add(EffectSpec.DynamicCrop(1.5f, 1.5f, 0.5f, 0.2f))
-                    } else {
-                        Log.e("HVE-Parser", "⚠️ Complex Crop detected, sending to FFmpeg Fallback...")
-                        return VideoPlan(false, "Complex crop '$args' not fully mapped to Media3 GPU", filter)
-                    }
+                    if (args.contains("sin(")) effectsList.add(EffectSpec.DynamicCrop(1.5f, 1.5f, 0.5f, 0.2f))
+                    else return VideoPlan(false, "Complex crop '$args' not fully mapped to Media3 GPU", filter)
                 }
-                else -> {
-                    // STRICT REJECTION: অজানা ইফেক্ট পেলে আর ফাঁকি দেবে না, সোজা FFmpeg-এ পাঠাবে!
-                    Log.e("HVE-Parser", "⚠️ Unsupported Filter: $name. Sending to FFmpeg Fallback...")
-                    return VideoPlan(false, "Unsupported filter: $name", filter)
-                }
+                // TASK 2: Strict Rejection. No more silent passes.
+                else -> return VideoPlan(false, "Unsupported filter: $name=$args", filter)
             }
         }
         
         if (effectsList.isEmpty() && filter.isNotBlank()) {
-            Log.e("HVE-Parser", "⚠️ Filter found but 0 effects parsed! Rejecting to prevent unedited output.")
             return VideoPlan(false, "Filter present but no effects were successfully parsed", filter)
         }
-
-        // লগবক্সে দেখার জন্য সিস্টেম
-        val effectNames = effectsList.joinToString { it::class.java.simpleName }
-        Log.d("HVE-Parser", "✅ Successfully Mapped GPU Effects: $effectNames")
         
         return VideoPlan(true, null, filter, effectsList)
     }
