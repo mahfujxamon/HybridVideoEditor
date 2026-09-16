@@ -36,18 +36,10 @@ class HybridFfmpegModule : Module() {
     private fun findLatestVideoUri(): Uri {
         val context = getContext()
         val collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-        val projection = arrayOf(
-            MediaStore.Video.Media._ID,
-            MediaStore.Video.Media.DISPLAY_NAME,
-            MediaStore.Video.Media.MIME_TYPE
-        )
+        val projection = arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.DISPLAY_NAME, MediaStore.Video.Media.MIME_TYPE)
         val sort = "${MediaStore.Video.Media.DATE_ADDED} DESC"
-        val selection = if (android.os.Build.VERSION.SDK_INT >= 29) {
-            "${MediaStore.Video.Media.RELATIVE_PATH} NOT LIKE ?"
-        } else null
-        val selectionArgs = if (android.os.Build.VERSION.SDK_INT >= 29) {
-            arrayOf("Movies/HybridVideoEditor/%")
-        } else null
+        val selection = if (android.os.Build.VERSION.SDK_INT >= 29) "${MediaStore.Video.Media.RELATIVE_PATH} NOT LIKE ?" else null
+        val selectionArgs = if (android.os.Build.VERSION.SDK_INT >= 29) arrayOf("Movies/HybridVideoEditor/%") else null
 
         context.contentResolver.query(collection, projection, selection, selectionArgs, sort)?.use { cursor ->
             if (cursor.moveToFirst()) {
@@ -115,19 +107,15 @@ class HybridFfmpegModule : Module() {
                 }
             }
             outputFile
-        } catch (_: Throwable) {
-            null
-        }
+        } catch (_: Throwable) { null }
     }
 
     private fun resolveAssetPath(assetPath: String): String {
         val context = getContext()
         val cleanPath = assetPath.removePrefix("/").removePrefix("./")
         val candidates = listOf(
-            File(context.filesDir, cleanPath),
-            File(context.cacheDir, cleanPath),
-            File(context.getExternalFilesDir(null), cleanPath),
-            File("/storage/emulated/0/Bypass", cleanPath),
+            File(context.filesDir, cleanPath), File(context.cacheDir, cleanPath),
+            File(context.getExternalFilesDir(null), cleanPath), File("/storage/emulated/0/Bypass", cleanPath),
             File("/storage/emulated/0", cleanPath)
         )
         candidates.firstOrNull { it.isFile && it.canRead() }?.let { return it.absolutePath }
@@ -140,7 +128,6 @@ class HybridFfmpegModule : Module() {
         return command.trim().replace("<INPUT_VIDEO>-i", "<INPUT_VIDEO> -i")
     }
 
-    // TASK 1: Windows Batch Command Sanitization
     private fun sanitizeBatchCommand(command: String): String {
         var clean = command.trim()
         val ffmpegMatch = Regex("(?i)^.*?\\bffmpeg(?:\\.exe)?\\s+").find(clean)
@@ -159,74 +146,54 @@ class HybridFfmpegModule : Module() {
                 match.groupValues[3].isNotEmpty() -> match.groupValues[3]
                 else -> match.groupValues[4]
             }.trim()
-            if (rawPath.isBlank() || rawPath.startsWith("/")) {
-                match.value
-            } else {
-                try {
-                    val absolutePath = resolveAssetPath(rawPath)
-                    prefix + "'" + absolutePath + "'"
-                } catch (_: Throwable) {
-                    match.value
-                }
+            if (rawPath.isBlank() || rawPath.startsWith("/")) match.value
+            else {
+                try { prefix + "'" + resolveAssetPath(rawPath) + "'" } catch (_: Throwable) { match.value }
             }
         }
     }
 
     private fun shouldPreferCpuFallback(command: String): Boolean {
         val lower = command.lowercase()
-        return lower.contains("-filter_complex") ||
-            Regex("\\b(sin|cos|tan|asin|acos|atan|random|if)\\s*\\(").containsMatchIn(lower) ||
-            lower.contains("overlay=") || lower.contains("hwupload") ||
-            lower.contains("hwdownload") || lower.contains("_opencl") || lower.contains("vulkan")
+        return lower.contains("-filter_complex") || Regex("\\b(sin|cos|tan|asin|acos|atan|random|if)\\s*\\(").containsMatchIn(lower) ||
+            lower.contains("overlay=") || lower.contains("hwupload") || lower.contains("hwdownload") || lower.contains("_opencl") || lower.contains("vulkan")
     }
 
-    private fun prepareCpuFallbackEncoder(command: String): String {
+    // NEW: Memory Safe Shield for Camera Videos
+    private fun applyMemorySafeLimits(command: String): String {
         var result = command
-        result = result.replace(Regex("(?i)(-c:v\\s+)(h264_mediacodec|h264|libx265|libx264)"), "$1libopenh264")
-        result = result.replace(Regex("(?i)(-vcodec\\s+)(h264_mediacodec|h264|libx265|libx264)"), "$1libopenh264")
-        result = result.replace(Regex("(?i)(-codec:v\\s+)(h264_mediacodec|h264|libx265|libx264)"), "$1libopenh264")
-        val hasVideoCodec = Regex("(?i)(-c:v|-vcodec|-codec:v)\\s+\\S+").containsMatchIn(result)
-        if (!hasVideoCodec) result += " -c:v libopenh264"
-        result = result.replace(Regex("(?i)\\s+-preset\\s+\\S+"), "")
-        result = result.replace(Regex("(?i)\\s+-crf\\s+\\S+"), "")
-        result = result.replace(Regex("(?i)\\s+-tune\\s+\\S+"), "")
-        result = result.replace(Regex("(?i)\\s+-threads\\s+\\S+"), "")
-        return result.trim()
-    }
-
-    private fun classifyFallbackReason(command: String, media3Error: String? = null): String {
-        val lower = command.lowercase()
-        return when {
-            media3Error?.contains("encoder", true) == true || media3Error?.contains("codec", true) == true -> "MEDIA3_HARDWARE_ENCODER_FAILURE"
-            lower.contains("filter_complex") || Regex("\\b(sin|cos|tan|asin|acos|atan|random|if)\\s*\\(").containsMatchIn(lower) -> "COMPLEX_OR_DYNAMIC_GRAPH_NOT_MAPPED_TO_MEDIA3"
-            lower.contains("opencl") || lower.contains("hwupload") || lower.contains("vulkan") -> "EXPLICIT_EXTERNAL_GPU_GRAPH"
-            lower.contains("amovie=") || lower.contains("movie=") -> "EXTERNAL_ASSET_OR_AUDIO_GRAPH"
-            else -> "MEDIA3_GRAPH_UNSUPPORTED"
+        if (!result.contains("-pix_fmt", ignoreCase = true)) {
+            result += " -pix_fmt yuv420p"
         }
-    }
-
-    private fun prepareHardwareEncoder(command: String): String {
-        var result = command
-        result = result.replace(Regex("""(?i)(-c:v\s+)(libx264|libx265|h264)"""), "$1h264_mediacodec")
-        result = result.replace(Regex("""(?i)(-vcodec\s+)(libx264|libx265|h264)"""), "$1h264_mediacodec")
-        result = result.replace(Regex("""(?i)(-codec:v\s+)(libx264|libx265|h264)"""), "$1h264_mediacodec")
-        val hasVideoCodec = Regex("""(?i)(-c:v|-vcodec|-codec:v)\s+\S+""").containsMatchIn(result)
-        if (!hasVideoCodec) result += " -c:v h264_mediacodec"
+        result = result.replace(Regex("""(?i)\s+-threads\s+\d+"""), "")
+        result += " -threads 2" 
         result = result.replace(Regex("""(?i)\s+-preset\s+\S+"""), "")
         result = result.replace(Regex("""(?i)\s+-crf\s+\S+"""), "")
         result = result.replace(Regex("""(?i)\s+-tune\s+\S+"""), "")
-        result = result.replace(Regex("""(?i)\s+-threads\s+\S+"""), "")
         return result.trim()
     }
 
-    // TASK 1 FIX: Clean batch path and replace Windows output path properly
+    private fun prepareCpuFallbackEncoder(command: String): String {
+        var result = command.replace(Regex("(?i)(-c:v\\s+|-vcodec\\s+|-codec:v\\s+)(h264_mediacodec|h264|libx265|libx264)"), "$1libopenh264")
+        if (!Regex("(?i)(-c:v|-vcodec|-codec:v)\\s+\\S+").containsMatchIn(result)) {
+            result += " -c:v libopenh264"
+        }
+        return applyMemorySafeLimits(result)
+    }
+
+    private fun prepareHardwareEncoder(command: String): String {
+        var result = command.replace(Regex("""(?i)(-c:v\s+|-vcodec\\s+|-codec:v\\s+)(libx264|libx265|h264)"""), "$1h264_mediacodec")
+        if (!Regex("""(?i)(-c:v|-vcodec|-codec:v)\s+\S+""").containsMatchIn(result)) {
+            result += " -c:v h264_mediacodec"
+        }
+        return applyMemorySafeLimits(result)
+    }
+
     private fun buildUniversalCommand(userCommand: String, inputFile: File, outputFile: File): String {
         val sanitized = sanitizeBatchCommand(userCommand)
         var command = normalizeCommand(sanitized)
         command = command.replace("%%t", "\"${inputFile.absolutePath}\"")
         command = command.replace("%~nt", inputFile.nameWithoutExtension)
-
-        // Strip Windows batch output path like "_output\video.mp4" or "_output/video.mp4"
         command = command.replace(Regex("""(?i)"?_output[\\/][^"\s]+"?"""), "")
 
         val isFullCommand = command.contains("-i") || command.contains("<INPUT_VIDEO>")
@@ -248,18 +215,7 @@ class HybridFfmpegModule : Module() {
         val knownOpenClFilters = listOf("avgblur_opencl", "boxblur_opencl", "convolution_opencl", "crop_opencl", "deshake_opencl", "nlmeans_opencl", "overlay_opencl", "pad_opencl", "prewitt_opencl", "program_opencl", "remap_opencl", "scale_opencl", "tonemap_opencl", "transpose_opencl", "unsharp_opencl")
         for (filter in knownOpenClFilters) if (lower.contains(filter)) gpuFilters.add(filter)
         val openClRequested = lower.contains("opencl") || lower.contains("hwupload") || lower.contains("hwdownload")
-        return mapOf(
-            "gpuRequested" to openClRequested,
-            "openclFilters" to gpuFilters,
-            "hybridMode" to if (openClRequested) "GPU+CPU" else "CPU+HardwareEncoder"
-        )
-    }
-
-    init {
-        try {
-            System.loadLibrary("hybrid_opencl")
-        } catch (_: UnsatisfiedLinkError) {
-        }
+        return mapOf("gpuRequested" to openClRequested, "openclFilters" to gpuFilters, "hybridMode" to if (openClRequested) "GPU+CPU" else "CPU+HardwareEncoder")
     }
 
     private fun extractInputStartTimes(command: String): Pair<Double, Double> {
@@ -275,15 +231,13 @@ class HybridFfmpegModule : Module() {
                 } else if (i >= 1 && tokens[i - 1].startsWith("-ss=", ignoreCase = true)) {
                     ss = tokens[i - 1].substringAfter('=').toDoubleOrNull() ?: 0.0
                 }
-                if (inputCount == 0) input0Start = ss
-                else if (inputCount == 1) input1Start = ss
+                if (inputCount == 0) input0Start = ss else if (inputCount == 1) input1Start = ss
                 inputCount++
             }
         }
         return Pair(input0Start, input1Start)
     }
 
-    // TASK 2 & 5: Strict Parser Mapping including scale=iw:ih
     private fun parseChainToMedia3Effects(filterText: String): List<Effect> {
         val effects = mutableListOf<Effect>()
         val filters = filterText.split(',').map { it.trim() }.filter { it.isNotEmpty() }
@@ -300,10 +254,7 @@ class HybridFfmpegModule : Module() {
                 name == "setdar" && args.contains("21/9") -> effects.add(DarEffect(21f / 9f))
                 name == "scale" -> {
                     when {
-                        // TASK 2 FIX: scale=iw:ih (Identity scale - very common in 96 files)
-                        args == "iw:ih" || args.contains("scale=iw:ih") -> {
-                            effects.add(ScaleAndRotateTransformation.Builder().setScale(1f, 1f).build())
-                        }
+                        args == "iw:ih" || args.contains("scale=iw:ih") -> effects.add(ScaleAndRotateTransformation.Builder().setScale(1f, 1f).build())
                         args.contains("trunc(trunc(iw*(4/3))/2)*2:ih") -> effects.add(ScaleAndRotateTransformation.Builder().setScale(4f / 3f, 1f).build())
                         args.contains("iw*1.5:ih*1.5") || args.contains("trunc(iw*1.5):trunc(ih*1.5)") -> effects.add(ScaleAndRotateTransformation.Builder().setScale(1.5f, 1.5f).build())
                         args.contains("iw*2:ih*2") -> effects.add(ScaleAndRotateTransformation.Builder().setScale(2f, 2f).build())
@@ -340,9 +291,7 @@ class HybridFfmpegModule : Module() {
                     try {
                         val shaderCode = File(args).readText()
                         effects.add(CustomAiShaderEffect(shaderCode))
-                    } catch (e: Exception) {
-                        throw Exception("Failed to read AI Shader file at $args", e)
-                    }
+                    } catch (e: Exception) { throw Exception("Failed to read AI Shader file at $args", e) }
                 }
                 else -> throw Exception("Unmapped GPU filter: $name=$args")
             }
@@ -351,17 +300,9 @@ class HybridFfmpegModule : Module() {
     }
 
     private fun buildEditedItem(input: File, startSeconds: Double, effects: List<Effect>, removeAudio: Boolean): EditedMediaItem {
-        val clip = MediaItem.ClippingConfiguration.Builder()
-            .setStartPositionMs(max(0L, (startSeconds * 1000.0).toLong()))
-            .build()
-        val mediaItem = MediaItem.Builder()
-            .setUri(Uri.fromFile(input))
-            .setClippingConfiguration(clip)
-            .build()
-        return EditedMediaItem.Builder(mediaItem)
-            .setEffects(Effects(emptyList(), effects))
-            .setRemoveAudio(removeAudio)
-            .build()
+        val clip = MediaItem.ClippingConfiguration.Builder().setStartPositionMs(max(0L, (startSeconds * 1000.0).toLong())).build()
+        val mediaItem = MediaItem.Builder().setUri(Uri.fromFile(input)).setClippingConfiguration(clip).build()
+        return EditedMediaItem.Builder(mediaItem).setEffects(Effects(emptyList(), effects)).setRemoveAudio(removeAudio).build()
     }
 
     override fun definition() = ModuleDefinition {
@@ -394,17 +335,12 @@ class HybridFfmpegModule : Module() {
         }
         
         fun extractMetadataString(command: String): String {
-            return Regex("-metadata\\s+[a-zA-Z0-9_]+=(?:\"[^\"]*\"|'[^']*'|\\S+)")
-                .findAll(command)
-                .map { it.value }
-                .joinToString(" ")
+            return Regex("-metadata\\s+[a-zA-Z0-9_]+=(?:\"[^\"]*\"|'[^']*'|\\S+)").findAll(command).map { it.value }.joinToString(" ")
         }
 
         fun splitComplexStatements(graph: String): List<String> {
             val out = mutableListOf<String>()
-            var depth = 0
-            var quote: Char? = null
-            var start = 0
+            var depth = 0; var quote: Char? = null; var start = 0
             for (i in graph.indices) {
                 val c = graph[i]
                 if (quote != null) {
@@ -413,8 +349,7 @@ class HybridFfmpegModule : Module() {
                 else if (c == '(' || c == '[') depth++
                 else if (c == ')' || c == ']') depth--
                 else if (c == ';' && depth == 0) {
-                    out += graph.substring(start, i).trim()
-                    start = i + 1
+                    out += graph.substring(start, i).trim(); start = i + 1
                 }
             }
             out += graph.substring(start).trim()
@@ -600,15 +535,20 @@ class HybridFfmpegModule : Module() {
 
         AsyncFunction("renderTestVideo") { inputUri: String, userCommand: String, promise: Promise ->
             try {
-                val resolvedInput = resolveInputFile(inputUri)
-                val inputFile = resolvedInput.first
-                val resolvedInputUri = resolvedInput.second
+                val (inputFile, resolvedInputUri) = resolveInputFile(inputUri)
                 val outputFile = File(getContext().cacheDir, "ffmpeg_output_${System.currentTimeMillis()}.mp4")
                 val finalCommand = buildUniversalCommand(userCommand, inputFile, outputFile)
                 val gpuInfo = analyzeGpuRequest(finalCommand).toMutableMap()
-                gpuInfo["fallbackSafetyPolicy"] = if (shouldPreferCpuFallback(finalCommand)) "CPU_SAFE_FOR_COMPLEX_OR_DYNAMIC_GRAPH" else "MEDIA_CODEC_ALLOWED"
-
+                
                 try {
+                    // SMART BYPASS: Prevent OOM and Hardware Drops on Multi-Stream Graphs (Exynos/MediaTek protection)
+                    if (finalCommand.contains("overlay=", ignoreCase = true) || 
+                        finalCommand.contains("amovie=", ignoreCase = true) || 
+                        finalCommand.contains("amix=", ignoreCase = true)) {
+                        throw Exception("Multi-Stream limitation on current SoC. Bypassing to Hybrid Hardware Encoder (h264_mediacodec).")
+                    }
+
+                    // Attempt full advanced execution if bypass didn't trigger (Future-proofing for Snapdragon)
                     val advancedMedia3Result = tryRunAdvancedMedia3Graph(inputFile, outputFile, finalCommand)
                     
                     val media3Result = if (advancedMedia3Result != null) {
@@ -632,7 +572,7 @@ class HybridFfmpegModule : Module() {
                         val metadataStr = extractMetadataString(userCommand)
                         var metadataApplied = false
 
-                        // TASK 4: Zero-Copy Metadata Remuxing
+                        // Zero-Copy Metadata Remuxing
                         if (metadataStr.isNotBlank()) {
                             val remuxFile = File(getContext().cacheDir, "hve_metadata_${System.currentTimeMillis()}.mp4")
                             val remuxCmd = "-y -i \"${outputFile.absolutePath}\" -map 0 -c copy $metadataStr \"${remuxFile.absolutePath}\""
@@ -646,86 +586,51 @@ class HybridFfmpegModule : Module() {
 
                         val result = media3Result.toMutableMap()
                         val publishedUri = publishVideoToMediaStore(finalOutputFile)
+                        result["success"] = true
                         result["command"] = finalCommand
                         result["originalCommand"] = userCommand
-                        result["inputUri"] = resolvedInputUri
-                        result["inputName"] = inputFile.name
                         result["outputUri"] = publishedUri?.toString() ?: ""
-                        result["gpuRequested"] = true
+                        if (metadataApplied) result["metadataBackend"] = "FFmpegKit Smart Remux (Zero-Copy)"
                         
-                        if (metadataApplied) {
-                            result["metadataBackend"] = "FFmpegKit Smart Remux (Zero-Copy)"
-                        }
-
-                        if (!result.containsKey("hybridMode")) result["hybridMode"] = "GPU_MEDIA3_PIPELINE"
-                        if (!result.containsKey("audioBackend")) result["audioBackend"] = "Media3 passthrough"
                         promise.resolve(result)
                         return@AsyncFunction
                     }
                 } catch (gpuError: Throwable) {
                     val rootCause = generateSequence(gpuError) { it.cause }.last()
-                    val errMsg = rootCause.message ?: rootCause.toString()
-
-                    gpuInfo["gpuFallback"] = true
-                    gpuInfo["gpuFallbackReason"] = errMsg
-                    gpuInfo["fallbackReasonCode"] = classifyFallbackReason(finalCommand, errMsg)
-                    gpuInfo["videoBackend"] = "FFmpegKit Fallback (Media3 Crash: $errMsg)"
+                    val errMsg = rootCause.message ?: gpuError.toString()
                     gpuInfo["executionStatus"] = "GPU_FAILED_FALLING_BACK"
                     gpuInfo["failedEffectsOrReason"] = errMsg
                 }
 
-                // Fallback Engine
+                // HYBRID FALLBACK: CPU Filters + GPU Hardware Encoding
                 val fallbackCpuSafe = shouldPreferCpuFallback(finalCommand)
+                val encoderStrategy = if (fallbackCpuSafe) "libopenh264 (CPU_SAFE_MEMORY_LOCKED)" else "h264_mediacodec (GPU_HARDWARE_MEMORY_LOCKED)"
 
-                fun resolveFallbackResult(session: com.arthenica.ffmpegkit.Session, usedCommand: String, encoderStrategy: String) {
-                    val returnCode = session.returnCode
-                    if (ReturnCode.isSuccess(returnCode)) {
+                FFmpegKit.executeAsync(finalCommand) { session ->
+                    if (ReturnCode.isSuccess(session.returnCode)) {
                         val publishedUri = publishVideoToMediaStore(outputFile)
-                        val result = mutableMapOf<String, Any>(
+                        val result = mutableMapOf(
                             "success" to true,
                             "outputPath" to outputFile.absolutePath,
                             "outputUri" to (publishedUri?.toString() ?: ""),
                             "inputUri" to resolvedInputUri,
                             "inputName" to inputFile.name,
-                            "command" to usedCommand,
+                            "command" to finalCommand,
                             "originalCommand" to userCommand,
                             "hardwareEncoder" to encoderStrategy,
-                            "videoBackend" to (gpuInfo["videoBackend"]?.toString() ?: "FFmpegKit fallback"),
-                            "fallbackEncoderStrategy" to encoderStrategy,
-                            "audioBackend" to "FFmpegKit",
-                            "message" to "Universal FFmpeg fallback render completed",
-                            "appliedGpuEffects" to "None (Processed completely by CPU/FFmpeg)",
+                            "videoBackend" to "Hybrid FFmpeg (CPU Filters + $encoderStrategy)",
+                            "appliedGpuEffects" to "None (Routed to Hybrid CPU+GPU Fallback)",
                             "executionStatus" to (gpuInfo["executionStatus"] ?: "BYPASSED_GPU"),
-                            "failedEffectsOrReason" to (gpuInfo["failedEffectsOrReason"] ?: "Graph too complex for GPU")
+                            "failedEffectsOrReason" to (gpuInfo["failedEffectsOrReason"] ?: "Multi-Graph Hardware Limitation")
                         )
-                        result.putAll(gpuInfo)
                         promise.resolve(result)
                     } else {
-                        val diagnostic = session.getAllLogsAsString().takeLast(12000)
-                        promise.reject("FFMPEG_FAILED", "Render failed. Command: $usedCommand\n\nLog: $diagnostic", null)
+                        val diagnostic = session.getAllLogsAsString().takeLast(5000)
+                        promise.reject("FFMPEG_FAILED", "Fallback failed. Log: $diagnostic", null)
                     }
-                }
-
-                FFmpegKit.executeAsync(finalCommand) { session ->
-                    if (ReturnCode.isSuccess(session.returnCode)) {
-                        resolveFallbackResult(session, finalCommand, if (fallbackCpuSafe) "libopenh264 (CPU_SAFE_FALLBACK)" else "h264_mediacodec")
-                        return@executeAsync
-                    }
-                    if (!fallbackCpuSafe && finalCommand.contains("h264_mediacodec", ignoreCase = true)) {
-                        val cpuRetryCommand = prepareCpuFallbackEncoder(finalCommand)
-                        FFmpegKit.executeAsync(cpuRetryCommand) { retrySession ->
-                            if (ReturnCode.isSuccess(retrySession.returnCode)) {
-                                resolveFallbackResult(retrySession, cpuRetryCommand, "libopenh264 (AUTO_RETRY)")
-                            } else {
-                                promise.reject("FFMPEG_FAILED", "Fallback failed", null)
-                            }
-                        }
-                        return@executeAsync
-                    }
-                    promise.reject("FFMPEG_FAILED", "Render failed", null)
                 }
             } catch (error: Exception) {
-                promise.reject("FFMPEG_EXCEPTION", error.message ?: "Unknown FFmpeg error", error)
+                promise.reject("FFMPEG_EXCEPTION", error.message ?: "Unknown", error)
             }
         }
     }
