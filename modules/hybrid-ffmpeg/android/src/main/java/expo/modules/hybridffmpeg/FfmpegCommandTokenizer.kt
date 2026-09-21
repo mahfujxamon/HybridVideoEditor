@@ -3,17 +3,30 @@ package expo.modules.hybridffmpeg
 object FfmpegCommandTokenizer {
     fun tokenize(command: String): List<String> {
         val tokens = mutableListOf<String>()
-        var current = StringBuilder()
+        val current = StringBuilder()
         var inQuotes = false
         var quoteChar = '\u0000'
+        var escapeNext = false
 
         for (char in command) {
-            if (char == '"' || char == '\'') {
+            if (escapeNext) {
+                current.append(char)
+                escapeNext = false
+                continue
+            }
+            if (char == '\\') {
+                current.append(char)
+                escapeNext = true
+                continue
+            }
+            if (char == '\'' || char == '"') {
                 if (!inQuotes) {
                     inQuotes = true
                     quoteChar = char
+                    current.append(char)
                 } else if (char == quoteChar) {
                     inQuotes = false
+                    current.append(char)
                 } else {
                     current.append(char)
                 }
@@ -26,17 +39,13 @@ object FfmpegCommandTokenizer {
                 current.append(char)
             }
         }
-        if (current.isNotEmpty()) tokens.add(current.toString())
+        if (current.isNotEmpty()) {
+            tokens.add(current.toString())
+        }
         return tokens
     }
 
-    fun hasOption(command: String, option: String): Boolean {
-        return tokenize(command).contains(option)
-    }
-
-    fun findOptionValue(command: String, option: String): String? {
-        val tokens = tokenize(command)
-        val idx = tokens.indexOf(option)
-        return if (idx != -1 && idx + 1 < tokens.size) tokens[idx + 1] else null
+    fun buildCommand(tokens: List<String>): String {
+        return tokens.joinToString(" ")
     }
 }
