@@ -1,4 +1,3 @@
-// File: src/app/index.tsx
 import React, { useState, useEffect } from 'react';
 import { View, Text, TextInput, Pressable, StyleSheet, ScrollView, Alert, KeyboardAvoidingView, Platform } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
@@ -97,14 +96,21 @@ export default function EditorScreen() {
           </Pressable>
         </View>
 
-        <Pressable style={styles.selectBtn} onPress={pickVideo}>
-          <Text style={styles.btnText}>{inputUri ? 'CHANGE VIDEO' : 'SELECT INPUT VIDEO'}</Text>
-        </Pressable>
-        {mediaInfo && (
-          <Text style={styles.mediaInfoText}>
-            {mediaInfo.width}x{mediaInfo.height} • {mediaInfo.fps} fps • {mediaInfo.codec} • {mediaInfo.duration}s
-          </Text>
-        )}
+        <View style={styles.previewContainer}>
+          <View style={styles.placeholder}>
+            <Text style={styles.placeholderText}>
+              {inputUri ? 'VIDEO SELECTED' : 'NO VIDEO SELECTED'}
+            </Text>
+          </View>
+          <Pressable style={styles.selectBtn} onPress={pickVideo}>
+            <Text style={styles.btnText}>{inputUri ? 'CHANGE VIDEO' : 'SELECT INPUT VIDEO'}</Text>
+          </Pressable>
+          {mediaInfo && (
+            <Text style={styles.mediaInfoText}>
+              {mediaInfo.width}x{mediaInfo.height} • {mediaInfo.fps} fps • {mediaInfo.codec} • {mediaInfo.duration}s
+            </Text>
+          )}
+        </View>
 
         <TextInput
           style={styles.commandInput}
@@ -148,9 +154,12 @@ const styles = StyleSheet.create({
   toggleActive: { backgroundColor: Colors.primary },
   toggleText: { color: Colors.textSecondary, fontWeight: 'bold', fontSize: 12 },
   toggleTextActive: { color: Colors.text },
-  selectBtn: { backgroundColor: Colors.surfaceElevated, padding: Spacing.md, alignItems: 'center', borderRadius: 8, borderWidth: 1, borderColor: Colors.border, marginBottom: Spacing.xs },
+  previewContainer: { backgroundColor: Colors.surface, borderRadius: 12, overflow: 'hidden', marginBottom: Spacing.lg, borderWidth: 1, borderColor: Colors.border },
+  placeholder: { width: '100%', height: 160, justifyContent: 'center', alignItems: 'center', backgroundColor: Colors.surfaceElevated },
+  placeholderText: { color: Colors.textSecondary, fontWeight: 'bold' },
+  selectBtn: { backgroundColor: Colors.surfaceElevated, padding: Spacing.md, alignItems: 'center', borderTopWidth: 1, borderTopColor: Colors.border },
   btnText: { color: Colors.text, fontWeight: 'bold' },
-  mediaInfoText: { color: Colors.accent, textAlign: 'center', fontSize: 12, marginBottom: Spacing.md },
+  mediaInfoText: { color: Colors.accent, textAlign: 'center', padding: Spacing.sm, fontSize: 12, fontWeight: 'bold', backgroundColor: Colors.surfaceElevated },
   commandInput: { backgroundColor: Colors.surface, color: Colors.text, padding: Spacing.md, borderRadius: 12, minHeight: 140, textAlignVertical: 'top', fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace', borderWidth: 1, borderColor: Colors.border, marginBottom: Spacing.lg },
   actionBtn: { padding: Spacing.lg, borderRadius: 12, alignItems: 'center', marginTop: Spacing.sm }
 });

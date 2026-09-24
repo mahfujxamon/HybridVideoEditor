@@ -1,12 +1,20 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as FileSystem from 'expo-file-system';
 import { CommandEntry } from '../types/ffmpeg';
 
-const LIBRARY_KEY = '@hve_command_library';
+const LIBRARY_FILE = FileSystem.documentDirectory + 'hve_command_library.json';
+
+const generateHash = (str: string) => {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = Math.imul(31, hash) + str.charCodeAt(i) | 0;
+  }
+  return hash.toString();
+};
 
 export const CommandLibraryService = {
   parseAndSaveFile: async (fileContent: string): Promise<number> => {
     const existing = await CommandLibraryService.getCommands();
-    const existingHashes = new Set(existing.map(c => c.command.trim()));
+    const existingHashes = new Set(existing.map(c => generateHash(c.command.trim())));
     
     const newCommands: CommandEntry[] = [];
     const blocks = fileContent.split('################################');
@@ -23,27 +31,36 @@ export const CommandLibraryService = {
           currentName = nameMatch[1].replace('Project File/', '').replace('.bat', '').trim();
         }
       } else if (trimmed.startsWith('for ') || trimmed.startsWith('ffmpeg')) {
-        if (currentName && trimmed && !existingHashes.has(trimmed)) {
+        const cmdHash = generateHash(trimmed);
+        if (currentName && trimmed && !existingHashes.has(cmdHash)) {
           newCommands.push({
             id: Math.random().toString(36).substring(7),
             name: currentName,
             command: trimmed,
             category: currentName.includes('Zoom') ? 'Zoom' : currentName.includes('Flip') ? 'Flip' : 'Transform'
           });
-          existingHashes.add(trimmed);
+          existingHashes.add(cmdHash);
           currentName = '';
         }
       }
     }
 
     if (newCommands.length > 0) {
-      await AsyncStorage.setItem(LIBRARY_KEY, JSON.stringify([...existing, ...newCommands]));
+      await FileSystem.writeAsStringAsync(LIBRARY_FILE, JSON.stringify([...existing, ...newCommands]));
     }
     return newCommands.length;
   },
 
   getCommands: async (): Promise<CommandEntry[]> => {
-    const data = await AsyncStorage.getItem(LIBRARY_KEY);
-    return data ? JSON.parse(data) : [];
+    try {
+      const info = await FileSystem.getInfoAsync(LIBRARY_FILE);
+      if (info.exists) {
+        const data = await FileSystem.readAsStringAsync(LIBRARY_FILE);
+        return JSON.parse(data);
+      }
+    } catch (e) {
+      console.error('Failed to read command library', e);
+    }
+    return [];
   }
 };
