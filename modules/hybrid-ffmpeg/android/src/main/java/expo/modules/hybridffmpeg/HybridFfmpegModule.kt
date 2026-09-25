@@ -6,8 +6,8 @@ import android.content.Context
 import android.net.Uri
 import android.provider.MediaStore
 import android.media.MediaCodecList
+import android.webkit.MimeTypeMap
 import com.arthenica.ffmpegkit.FFmpegKit
-import com.arthenica.ffmpegkit.FFmpegKitConfig
 import com.arthenica.ffmpegkit.FFprobeKit
 import com.arthenica.ffmpegkit.ReturnCode
 import expo.modules.kotlin.Promise
@@ -26,6 +26,27 @@ class HybridFfmpegModule : Module() {
                 info.isEncoder && info.supportedTypes.any { type -> type.equals("video/avc", ignoreCase = true) }
             }
         } catch (e: Exception) { false }
+    }
+
+    private fun copyMediaToCache(uriString: String): File {
+        val context = getContext()
+        val uri = Uri.parse(uriString)
+
+        // If it's already a file in our cache directory, don't duplicate it
+        if (uri.scheme == "file" && uri.path?.startsWith(context.cacheDir.absolutePath) == true) {
+            return File(uri.path!!)
+        }
+
+        val extension = context.contentResolver.getType(uri)?.let { mimeType ->
+            MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)
+        } ?: uri.path?.substringAfterLast('.', "mp4")?.takeIf { it.length in 1..4 } ?: "mp4"
+
+        val inputFile = File(context.cacheDir, "ffmpeg_input_${System.currentTimeMillis()}.$extension")
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            FileOutputStream(inputFile).use { output -> input.copyTo(output) }
+        } ?: throw Exception("Cannot open stream for URI: $uriString")
+
+        return inputFile
     }
 
     private fun publishVideoToMediaStore(source: File): String? {
@@ -60,12 +81,14 @@ class HybridFfmpegModule : Module() {
 
         AsyncFunction("probeMedia") { uriString: String, promise: Promise ->
             try {
-                val uri = Uri.parse(uriString)
-                val safUrl = FFmpegKitConfig.getSafParameterForRead(getContext(), uri)
-                val session = FFprobeKit.getMediaInformation(safUrl)
+                // 1. Ensure content:// URI is copied to a readable local path
+                val cachedFile = copyMediaToCache(uriString)
+                val localPath = cachedFile.absolutePath
+
+                val session = FFprobeKit.getMediaInformation(localPath)
                 val info = session.mediaInformation
                 
-                if (info != null) {
+                if (ReturnCode.isSuccess(session.returnCode) && info != null) {
                     val stream = info.streams.firstOrNull { it.type == "video" }
                     promise.resolve(mapOf(
                         "format" to info.format,
@@ -75,13 +98,15 @@ class HybridFfmpegModule : Module() {
                         "width" to stream?.width,
                         "height" to stream?.height,
                         "codec" to stream?.codec,
-                        "fps" to stream?.averageFrameRate
+                        "fps" to stream?.averageFrameRate,
+                        "localUri" to "file://$localPath"
                     ))
                 } else {
-                    promise.reject("PROBE_FAILED", "Could not extract media information", null)
+                    val logs = session.allLogsAsString
+                    promise.reject("PROBE_FAILED", "FFprobe failed: $logs", null)
                 }
             } catch (e: Exception) {
-                promise.reject("PROBE_ERROR", e.message, e)
+                promise.reject("PROBE_ERROR", e.message ?: "Unknown error during probe", e)
             }
         }
 
@@ -109,7 +134,13 @@ class HybridFfmpegModule : Module() {
                 var safeInputPath: String? = null
                 if (!inputUriString.isNullOrBlank()) {
                     val uri = Uri.parse(inputUriString)
-                    safeInputPath = FFmpegKitConfig.getSafParameterForRead(context, uri)
+                    if (uri.scheme == "file") {
+                        safeInputPath = uri.path
+                    } else {
+                        // Fallback handling if a content:// uri bypassed probeMedia
+                        val cachedFile = copyMediaToCache(inputUriString)
+                        safeInputPath = cachedFile.absolutePath
+                    }
                 }
                 
                 val outputFile = File(context.cacheDir, "ffmpeg_output_${System.currentTimeMillis()}.mp4")

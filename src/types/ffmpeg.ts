@@ -32,6 +32,7 @@ export interface MediaInfo {
   height?: number;
   codec?: string;
   fps?: string;
+  localUri?: string;
 }
 
 export interface CommandEntry {

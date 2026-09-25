@@ -1,3 +1,4 @@
+// File: src/app/index.tsx
 import React, { useState, useEffect } from 'react';
 import { View, Text, TextInput, Pressable, StyleSheet, ScrollView, Alert, KeyboardAvoidingView, Platform } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
@@ -41,12 +42,12 @@ export default function EditorScreen() {
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ImagePicker.MediaTypeOptions.Videos });
     if (!result.canceled && result.assets[0]) {
       const uri = result.assets[0].uri;
-      setInputUri(uri);
       try {
         const info = await FfmpegService.probeMedia(uri);
+        setInputUri(info.localUri || uri);
         setMediaInfo(info);
-      } catch (e) {
-        Alert.alert("Probe Failed", "Could not read video metadata.");
+      } catch (e: any) {
+        Alert.alert("Probe Failed", e.message || "Could not read video metadata.");
       }
     }
   };
