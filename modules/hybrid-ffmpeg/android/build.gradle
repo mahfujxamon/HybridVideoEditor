@@ -1,3 +1,4 @@
+// File: modules/hybrid-ffmpeg/android/build.gradle
 plugins {
     id 'com.android.library'
     id 'expo-module-gradle-plugin'
@@ -20,6 +21,10 @@ android {
 
 dependencies {
     implementation project(':expo-modules-core')
-    // Pinned to exact maintained version as requested
+    
+    // FFmpegKit Maintained
     implementation 'dev.ffmpegkit-maintained:ffmpeg-kit-full:8.1.7'
+    
+    // REQUIRED by FFmpegKit for JNI exception handling (Fixes the NoClassDefFoundError)
+    implementation 'com.arthenica:smart-exception-java:0.2.1'
 }
