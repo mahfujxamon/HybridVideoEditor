@@ -153,9 +153,13 @@ class HybridFfmpegModule : Module() {
                     baseCommand = baseCommand.replace("<OUTPUT_VIDEO>", "\"${outputFile.absolutePath}\"")
                 } else {
                     val tempTokens = FfmpegCommandTokenizer.tokenize(baseCommand).toMutableList()
-                    if (tempTokens.isNotEmpty() && !tempTokens.last().startsWith("-") && tempTokens.last().endsWith(".mp4", true)) {
-                        tempTokens.removeAt(tempTokens.size - 1)
-                        baseCommand = FfmpegCommandTokenizer.buildCommand(tempTokens)
+                    if (tempTokens.isNotEmpty() && !tempTokens.last().startsWith("-")) {
+                        // FIX: Remove quotes before checking endsWith
+                        val cleanLastToken = tempTokens.last().trim('"', '\'')
+                        if (cleanLastToken.endsWith(".mp4", ignoreCase = true) || cleanLastToken.endsWith(".mkv", ignoreCase = true)) {
+                            tempTokens.removeAt(tempTokens.size - 1)
+                            baseCommand = FfmpegCommandTokenizer.buildCommand(tempTokens)
+                        }
                     }
                     baseCommand = "$baseCommand \"${outputFile.absolutePath}\""
                 }
