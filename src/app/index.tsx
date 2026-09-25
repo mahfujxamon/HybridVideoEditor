@@ -73,12 +73,8 @@ export default function EditorScreen() {
       setStatus('CANCELLED');
     } else {
       setStatus('ERROR');
-      } else if (result.errorType === 'CANCELLED') {
-      setStatus('CANCELLED');
-    } else {
-      setStatus('ERROR');
       // FIX: Show the actual FFmpeg log so we know exactly why it failed
-      const errorLog = result.ffmpegLog ? `\n\nLog:\n${result.ffmpegLog.substring(result.ffmpegLog.length - 500)}` : '';
+      const errorLog = (result as any).ffmpegLog ? `\n\nLog:\n${(result as any).ffmpegLog.substring((result as any).ffmpegLog.length - 500)}` : '';
       Alert.alert("Render Failed", `${result.errorType}\n${result.errorMessage}${errorLog}`);
     }
   };
